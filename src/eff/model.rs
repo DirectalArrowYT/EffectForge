@@ -190,11 +190,12 @@ pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
             fn walk(
                 list: &[effect_library::Emitter],
                 textures: &[effect_library::ptcl_file::TextureDescriptor],
+                version: u16,
                 out: &mut Vec<Option<crate::draw::inputs::GameEmitter>>,
             ) {
                 for e in list {
-                    out.push(crate::draw::inputs::GameEmitter::read(e, textures));
-                    walk(&e.children, textures, out);
+                    out.push(crate::draw::inputs::GameEmitter::read(e, textures, version));
+                    walk(&e.children, textures, version, out);
                 }
             }
             p.emitter_list
@@ -202,7 +203,7 @@ pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
                 .iter()
                 .map(|set| {
                     let mut out = Vec::new();
-                    walk(&set.emitters, textures, &mut out);
+                    walk(&set.emitters, textures, p.vfx_version, &mut out);
                     out
                 })
                 .collect()

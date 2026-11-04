@@ -157,7 +157,7 @@ fn sampler_key(s: &effect_library::TextureSampler) -> crate::draw::gpu::SamplerK
 }
 
 impl GameEmitter {
-    pub fn read(emitter: &effect_library::Emitter, textures: &[effect_library::ptcl_file::TextureDescriptor]) -> Option<Self> {
+    pub fn read(emitter: &effect_library::Emitter, textures: &[effect_library::ptcl_file::TextureDescriptor], version: u16) -> Option<Self> {
         let stored = emitter.binary_data.as_ref().or(emitter.cached_binary.as_ref())?;
         let samplers = [&emitter.data.sampler0, &emitter.data.sampler1, &emitter.data.sampler2].map(|sampler| {
             let s = sampler.as_ref()?;
@@ -165,7 +165,7 @@ impl GameEmitter {
             Some((index, sampler_key(s)))
         });
         Some(Self {
-            block: std::sync::Arc::new(crate::draw::block::emitter_block(emitter)?),
+            block: std::sync::Arc::new(crate::draw::block::emitter_block(emitter, version)?),
             stored: std::sync::Arc::new(stored.clone()),
             shader_index: u32::try_from(emitter.data.shader_references.shader_index).ok()?,
             samplers,

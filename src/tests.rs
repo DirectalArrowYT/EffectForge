@@ -156,7 +156,7 @@ const SPAWNS: u64 = 0xffeeb80362f78a05;
 #[test]
 fn every_pit_shader_translates() {
     let Some(path) = pit() else { return };
-    let dir = std::env::temp_dir().join("effect_forge_test_shaders");
+    let dir = crate::scratch_dirs::app_storage_root().join("test_shaders");
     let _ = std::fs::remove_dir_all(&dir);
     let n = crate::draw::shaders::dump_variations(&std::fs::read(&path).unwrap(), &dir).unwrap();
     let (ok, all) = crate::draw::shaders::translate_dir(&dir).unwrap();
@@ -187,3 +187,38 @@ fn baked_modes_are_real_fields() {
         assert!(fields::index_of(id).is_some(), "{id}");
     }
 }
+
+/// Every emitter's c9 block in ef_pit and ef_common (and `FORGE_TEST_BLOCKS`, `;`-separated, if set), pinned by a hash.
+#[test]
+fn blocks_are_unchanged() {
+    let mut files: Vec<PathBuf> = [pit(), common()].into_iter().flatten().collect();
+    let extra = std::env::var("FORGE_TEST_BLOCKS").ok();
+    files.extend(extra.iter().flat_map(|s| s.split(';')).map(PathBuf::from));
+    if files.is_empty() {
+        return;
+    }
+    let mut text = Vec::new();
+    let mut count = 0;
+    for path in &files {
+        let file = effect_library::NamcoEffectFile::load(&std::fs::read(path).unwrap()).unwrap();
+        let ptcl = file.ptcl_file.as_ref().unwrap();
+        fn walk(list: &[effect_library::Emitter], version: u16, out: &mut Vec<u8>, count: &mut usize) {
+            for e in list {
+                if let Some(block) = crate::draw::block::emitter_block(e, version) {
+                    out.extend(block);
+                    *count += 1;
+                }
+                walk(&e.children, version, out, count);
+            }
+        }
+        for set in &ptcl.emitter_list.emitter_sets {
+            walk(&set.emitters, ptcl.vfx_version, &mut text, &mut count);
+        }
+    }
+    println!("{count} blocks, hash {:#x}", fnv(&text));
+    if extra.is_none() {
+        assert!(count > 1000);
+        assert_eq!(fnv(&text), BLOCKS);
+    }
+}
+const BLOCKS: u64 = 0x78b5d9d39362d018;
