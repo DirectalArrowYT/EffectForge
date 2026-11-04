@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::draw::sim::{spawns_moving, EmitterSim, Slots};
+use crate::draw::sim::{spawns_moving, EmitterSim};
 use crate::engine::{self, Doc, Pending};
 use crate::eff::fields::{self, AttrValue};
 
@@ -130,13 +130,12 @@ fn spawns_are_unchanged() {
     let Some(path) = common() else { return };
     let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
     let doc = open(&path);
-    let slots = Slots::new();
     let moving = |t: f32| t * 2.5;
     let mut text = String::new();
     let mut count = 0;
     for (name, set) in doc.effects() {
         for (i, emitter) in doc.emitters(set).iter().enumerate() {
-            let sim = EmitterSim::read(emitter, &slots);
+            let sim = EmitterSim::read(emitter);
             for age in [0.0, 1.0, 4.0, 15.0, 40.0, 90.0] {
                 let seed = fnv(format!("{name}/{i}").as_bytes());
                 for travelled in [None, Some(&moving as &dyn Fn(f32) -> f32)] {

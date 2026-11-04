@@ -164,7 +164,6 @@ impl Doc {
                 src_file_rel: String::new(),
                 src_set_name: entry.to_string(),
                 src_set_idx: set_idx,
-                one_slot_slots: Vec::new(),
                 replace_entry: None,
             }],
             ..Default::default()
@@ -182,7 +181,7 @@ impl Doc {
     }
 
     fn rebuilt(&self, eff: &EffMod) -> Result<Self> {
-        let bytes = crate::eff::writer::rebuild_eff_bytes_for_slot(&self.bytes, eff, None, None)?;
+        let bytes = crate::eff::writer::rebuild(&self.bytes, eff, None)?;
         Self::from_bytes(self.path.clone(), bytes)
     }
 }
@@ -246,11 +245,10 @@ impl Doc {
                 src_file_rel: working.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
                 src_set_name: entry.to_string(),
                 src_set_idx: set_idx,
-                one_slot_slots: Vec::new(),
                 replace_entry: entry_names(&bytes)?.iter().any(|n| n.eq_ignore_ascii_case(entry)).then(|| entry.to_string()),
             };
             let eff = EffMod { transplants: vec![op], ..Default::default() };
-            let staged = crate::eff::writer::rebuild_eff_bytes_for_slot(&bytes, &eff, working.parent(), None)?;
+            let staged = crate::eff::writer::rebuild(&bytes, &eff, working.parent())?;
             std::fs::write(tuned_path, staged)?;
         } else {
             // The first one: the whole file, which every later one replaces an effect of.
@@ -291,7 +289,6 @@ pub fn merge_tuned(tuned_path: &Path, into: &[u8]) -> Result<(Vec<u8>, usize)> {
             src_file_rel: tuned_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
             src_set_name: entry.clone(),
             src_set_idx: set_idx,
-            one_slot_slots: Vec::new(),
             replace_entry: names.iter().any(|n| n.eq_ignore_ascii_case(entry)).then(|| entry.clone()),
         });
     }
@@ -299,7 +296,7 @@ pub fn merge_tuned(tuned_path: &Path, into: &[u8]) -> Result<(Vec<u8>, usize)> {
     if count == 0 {
         return Ok((into.to_vec(), 0));
     }
-    Ok((crate::eff::writer::rebuild_eff_bytes_for_slot(into, &eff, tuned_path.parent(), None)?, count))
+    Ok((crate::eff::writer::rebuild(into, &eff, tuned_path.parent())?, count))
 }
 
 fn entry_of(doc: &Doc, set_idx: usize) -> String {

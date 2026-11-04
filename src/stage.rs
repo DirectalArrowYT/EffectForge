@@ -161,13 +161,12 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
                 src_file_rel: from.clone(),
                 src_set_name: src.clone(),
                 src_set_idx: 0,
-                one_slot_slots: Vec::new(),
                 replace_entry: None,
             })
             .collect(),
         ..Default::default()
     };
-    let cloned = crate::eff::writer::rebuild_eff_bytes_for_slot(&original, &phase1, Some(&root), None)
+    let cloned = crate::eff::writer::rebuild(&original, &phase1, Some(&root))
         .expect("phase 1: the effects come in");
 
     /// A colour moved toward `hue`, keeping its brightness AND its saturation: a white
@@ -517,7 +516,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         entry_edits,
         ..Default::default()
     };
-    let mut built = crate::eff::writer::rebuild_eff_bytes_for_slot(&cloned, &phase2, None, None)
+    let mut built = crate::eff::writer::rebuild(&cloned, &phase2, None)
         .expect("phase 2: the art applies");
 
     // Meshes last: a new primitive per source mesh, pointed at by the emitters that draw it. Builds
@@ -562,7 +561,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
             .collect();
         let refs: Vec<&str> = keep_names.iter().map(String::as_str).collect();
         let before = built.len();
-        built = crate::eff::writer::strip_donor_eff_bytes(&built, &refs).expect("stripping to this character's effects");
+        built = crate::eff::writer::keep_only_entries(&built, &refs).expect("stripping to this character's effects");
         println!("kept {} entries under {keep_prefixes:?}: {before} -> {} bytes", keep_names.len(), built.len());
     }
 

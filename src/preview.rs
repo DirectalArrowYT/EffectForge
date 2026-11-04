@@ -13,7 +13,7 @@ use crate::draw::inputs::{Dynamic, GameDraw};
 use crate::draw::gpu::{DrawInputs, GameEffectRenderer, PreparedDraw, ShaderLibrary, TextureInput, FRAGMENT, VERTEX};
 use crate::eff::mesh_io::MeshData;
 use crate::draw::inputs::TextureKey;
-use crate::draw::sim::{spawns_moving, EmitterSim, Slots};
+use crate::draw::sim::{spawns_moving, EmitterSim};
 use crate::engine::Doc;
 use crate::eff::textures::{decode_for_sampling, SampledTexture};
 
@@ -46,7 +46,6 @@ struct Target {
 
 pub struct Preview {
     render: RenderState,
-    slots: Slots,
     target: Option<Target>,
     renderer: Option<(PathBuf, GameEffectRenderer)>,
     /// What the open file's draws sample, built as needed and dropped when the file changes.
@@ -72,7 +71,7 @@ impl Preview {
         // wgpu panics on these by default. The effect at fault is named by the log's last line.
         render.device.on_uncaptured_error(Arc::new(|error| crate::log::note(&format!("GPU error: {error}"))));
         Self {
-            render, slots: Slots::new(), target: None, renderer: None, meshes: HashMap::new(), pixels: HashMap::new(),
+            render, target: None, renderer: None, meshes: HashMap::new(), pixels: HashMap::new(),
             views: HashMap::new(), age: 0.0, playing: true, orbit: egui::Vec2::ZERO, solo: None, half_view: HALF_VIEW,
             outline: None, swing: false, outline_pipeline: None,
         }
@@ -88,7 +87,7 @@ impl Preview {
     /// How long the effect takes to play through once.
     pub fn length(&self, doc: &Doc, set_idx: usize) -> f32 {
         doc.emitters(set_idx).iter().map(|em| {
-            let sim = EmitterSim::read(em, &self.slots);
+            let sim = EmitterSim::read(em);
             sim.emission_start + sim.emission_duration.min(240.0) + sim.life
         }).fold(30.0, f32::max).min(600.0)
     }
@@ -102,7 +101,7 @@ impl Preview {
                 continue;
             }
             let Some(game) = doc.loaded.game.get(set_idx).and_then(|set| set.get(index)).cloned().flatten() else { continue };
-            let sim = EmitterSim::read(emitter, &self.slots);
+            let sim = EmitterSim::read(emitter);
             let seed = (set_idx as u64) << 32 ^ (index as u64) << 8;
             let (local, local_rt) = crate::draw::inputs::emitter_local(&game.stored);
             let speed = SWING_RADIUS * std::f32::consts::TAU / SWING_FRAMES;

@@ -1,6 +1,6 @@
 //! Particle simulation, evaluated closed-form at any frame.
 //!
-//! The editor scrubs. A conventional particle system steps state forward a frame at a time and
+//! The preview scrubs. A conventional particle system steps state forward a frame at a time and
 //! cannot answer "what does frame 30 look like" without having run frames 0..29 first, so
 //! dragging the playhead backwards either shows the wrong thing or forces a replay from the
 //! start of the move. Everything here is therefore a pure function of the particle's age, and
@@ -9,19 +9,23 @@
 //!
 //! The rules themselves -- when an emitter fires, how many particles a firing makes, what each
 //! random percentage does, how drag and gravity step -- are the game's own, read out of the
-//! particle library in the 13.0.3 executable (NintendoWare Vfx, see
-//! `research/decomp/ssbu-re`). Where a comment gives an address, that is the function the rule
-//! was read from. The game steps a frame at a time; the forms here are the sums of those steps,
-//! so they agree with it on whole frames and interpolate between them.
+//! particle library in the 13.0.3 executable (NintendoWare Vfx). Where a comment gives an
+//! address, that is the function the rule was read from. The game steps a frame at a time; the
+//! forms here are the sums of those steps, so they agree with it on whole frames and interpolate
+//! between them.
+//!
+//! Only the particles' births and paths are worked out here. Size, colour, turn and texture
+//! animation over a particle's life are the game's own vertex shaders' job (`draw::gpu`), fed the
+//! [`Spawn`]s this makes.
 //!
 //! That constraint rules out anything path-dependent — collision, turbulence that integrates,
 //! drag applied per step — and those are the parts this deliberately does not model. What it
 //! does cover is what the overwhelming majority of Smash effects are made of: an emitter
 //! producing particles at a rate for a duration, each living a fixed life, moving under an
-//! initial velocity and gravity, changing size and colour across that life.
+//! initial velocity and gravity.
 
-use crate::eff::fields::AttrValue;
-use crate::eff::model::{ColorKey, EmitterDef};
+use crate::eff::fields::{self, AttrValue};
+use crate::eff::model::EmitterDef;
 
 /// Deterministic per-particle randomness.
 ///
@@ -46,11 +50,7 @@ fn hashed_signed(seed: u64, salt: u64) -> f32 {
     hashed(seed, salt) * 2.0 - 1.0
 }
 
-/// The emitter fields the simulation reads, pulled out of the attribute table once.
-///
-/// Resolved by attribute id rather than by index: the table is generated and its ordering is
-/// not a stable interface, so an index captured here would silently start reading a different
-/// field the next time a row is inserted.
+/// The emitter fields the simulation reads.
 #[derive(Debug, Clone)]
 pub struct EmitterSim {
     /// Particles per firing, not per frame: the emitter fires every `interval + 1` frames and
@@ -71,8 +71,6 @@ pub struct EmitterSim {
     /// Radius of a random shell around the spawn point: a unit direction times this, not a
     /// box.
     pub position_random: f32,
-    /// Whether gravity pulls along the world's axes rather than the emitter's own.
-    pub world_gravity: bool,
     /// Per-frame multiplier on velocity. 1 is no drag.
     pub air_res: f32,
     /// Symmetric spread on how far a particle travels per frame for its velocity: each one
@@ -92,28 +90,6 @@ pub struct EmitterSim {
     /// Speed outward from the emitter's Y axis, taken from where in the shape the particle
     /// was born.
     pub xz_diffusion: f32,
-    pub scale: glam::Vec3,
-    /// Particle size over its own life: (frame, xyz). This is the PARTICLE's scale, distinct
-    /// from `scale` above which is the emitter's — reading the emitter's as the particle's
-    /// gives every particle in the game the same size, because emitters are nearly all 1.0.
-    pub scale_keys: Vec<(f32, glam::Vec3)>,
-    /// How the emitter says its texture is cut into cells, if it says at all.
-    ///
-    /// This is the authority when it is set: an explosion's 4x4 sheet is declared here and
-    /// nowhere else, and inferring a grid from a square texture's proportions returns "one
-    /// cell", which draws the whole sheet on every particle.
-    pub uv_div: (u32, u32),
-    /// The texture's own animation inside the particle, from `tex_scroll_anim0`: an offset
-    /// and a zoom, each with a per-frame rate.
-    ///
-    /// This is what sweeps an attack arc. SYS_ATTACK_ARC_D scrolls V by 0.27 and zooms it
-    /// 1.4x, both moving every frame, which slides a window across a slash frame so the arc
-    /// is drawn from one end to the other. Without it the frame sits still, whole, and tapers
-    /// at both ends.
-    pub uv_scroll: glam::Vec2,
-    pub uv_scroll_add: glam::Vec2,
-    pub uv_scale: glam::Vec2,
-    pub uv_scale_add: glam::Vec2,
     /// The shape particles are born in, as the game's own table at 0x4f48c30 orders them:
     /// 0 point, 1 circle, 2 circle-same-divide, 3 filled circle, 4 sphere,
     /// 5 sphere-same-divide, 6 sphere-same-divide-64, 7 filled sphere, 8 cylinder,
@@ -154,552 +130,103 @@ pub struct EmitterSim {
     pub num_divide_line: (u32, f32),
     /// The particle's size in world units, before its curve and the emitter's scale.
     ///
-    /// This is the one that carries the data: across ef_common it runs 0.1 to 300, while the
-    /// emitter's own scale is 1.0 on all but two of 1348 emitters. Building a size without it
-    /// draws every particle in the game about a unit across, whatever the effect asked for.
+    /// Across ef_common it runs 0.1 to 300, while the emitter's own scale is 1.0 on all but two
+    /// of 1348 emitters.
     pub particle_scale: glam::Vec3,
-    /// Per-particle spread on that size, as a PERCENTAGE -- 30 means a particle lands
-    /// anywhere in 0.7x to 1.3x. Better than half the corpus sets one, and without it a
-    /// cloud is a stack of identically sized puffs.
+    /// Per-particle spread on that size, as a PERCENTAGE taken off -- 30 means 0.7x to 1x. The
+    /// game takes one percentage for all three axes, X's.
     pub scale_random: glam::Vec3,
-    pub billboard_type: i64,
-    /// How the emitter's particles blend with what is behind them.
-    ///
-    /// 0 is normal alpha, 1 additive, 2 subtractive -- the format's own numbering, with 0 the
-    /// default as a format's zero usually is. Across two real fighter files this splits about
-    /// 73 / 25 / 3, so an assumption that everything is additive is wrong for roughly three
-    /// quarters of every emitter in the game, and wrong in the direction that makes smoke and
-    /// dust glow like fire.
-    pub blend_type: i64,
-    /// Brightness multiplier on the emitter's colour, straight out of the emitter's constant
-    /// buffer (`emitter_static.color_scale`). Values run about 1.0 to 5.0 in the game's own
-    /// effects, so ignoring it draws everything dimmer and flatter than it plays -- and the
-    /// ones that clip to white in game, which is what makes a hit spark read as a flash,
-    /// never clip here at all.
-    pub color_scale: f32,
-    /// Which texture channel carries the particle's shape: 0 the texture's alpha, 1 its red,
-    /// 2 nothing (fully opaque).
-    ///
-    /// Confirmed in game rather than inferred: a decal set to 1 with black art disappeared,
-    /// because its shape lives in alpha and its red is zero everywhere.
-    pub alpha_input: i64,
-    /// Where the particle's colour comes from: 0 the texture's RGB, 1 the emitter's colour
-    /// alone, with the texture contributing only shape.
-    pub color_input: i64,
-    /// How the emitter's textures are meant to be read. 2 is the indirect path, where the
-    /// first texture displaces the lookup into the second rather than being drawn itself --
-    /// every emitter using it in ef_common binds a second texture, and it is how fire is built.
-    pub shader_type: i64,
-    /// How a plain second texture folds into the first: 0 multiply, 1 add, 2 subtract.
-    pub tex1_blend: i64,
-    /// The particle's own roll about the quad's normal, and how it changes.
-    ///
-    /// `init` is where the particle starts, `init_rand` a symmetric spread on that, `add` the
-    /// per-frame velocity and `add_rand` a spread on that. Radians, as the emitter's own
-    /// rotation is.
-    ///
-    /// Reading these is what tells a spinning smoke puff apart from an attack arc. Both are
-    /// one quad with a texture on it; the puff carries a full turn of `init_rand` so every
-    /// one in the cloud sits differently, and the arc carries zeros because the crescent is
-    /// painted at the angle it is meant to be seen at. Substituting a random roll for the
-    /// data made the puffs look right and left the arc at a random angle every time -- and no
-    /// orientation setting could correct it, because the error was per-particle.
+    /// The particle's starting roll, radians, on the axes `particle_data.is_rotate_*` enables.
+    /// Across ef_common Z is enabled on 49% of emitters, Y on 14% and X on 5%.
     pub rotate_init: glam::Vec3,
-    pub rotate_init_rand: glam::Vec3,
-    pub rotate_add: glam::Vec3,
-    pub rotate_add_rand: glam::Vec3,
-    /// Which axes the emitter actually animates, from `particle_data.is_rotate_*`.
-    ///
-    /// Not decoration. Across ef_common Z is enabled on 49% of emitters, Y on 14% and X on
-    /// 5%, so an implementation that assumes the roll is always about Z covers about half the
-    /// game and silently drops the rest -- including SYS_ATTACK_ARC, which sweeps about Y.
     pub rotate_enabled: [bool; 3],
-    /// Per-frame multiplier on rotation velocity -- a resistance, not a rate. The arc carries
-    /// 0.99 and its cylinder 0.98, so the sweep slows as it goes.
-    ///
-    /// Zero means the emitter never set it, not "stop instantly": treating an unset field as
-    /// total damping would freeze every rotation in the game.
-    pub rotate_regist: f32,
     /// How particles keep to the emitter once born: 0 they move with it, 1 they stay where they were born (what every
     /// trail in the game uses), 2 they follow its position but not its turn.
     pub follow_type: i64,
     /// Fire by how far the emitter has moved rather than by the clock: `rate` particles every `unit` of travel. A
     /// standing emitter makes none. Every trail in the game is built this way.
     pub distance: Option<Distance>,
-    /// Number of cells the emitter's texture is divided into. Zero or one means the texture is
-    /// a single image and the particle uses all of it.
-    pub pattern_cells: u32,
-    /// Cell index to show at each step of the pattern animation.
-    pub pattern_table: Vec<i32>,
-    /// Frames each pattern step lasts.
-    pub pattern_frequency: f32,
-    /// Cells the emitter's texture divides into, worked out from the texture's real size. Set
-    /// by the caller, which is the side that knows the texture; the emitter data alone does
-    /// not say.
-    pub sheet_cells: u32,
     /// Name hash of the primitive this emitter draws, when it draws one. Matched against the
     /// file's descriptor table -- it is not an index, and treating it as one finds the wrong
     /// mesh or none.
     pub primitive_id: Option<u64>,
-    /// The emitter's own offset from the effect's origin, and its orientation.
-    ///
-    /// Ignored until now, which stacked every emitter of an effect at one point: SYS_TURN_SMOKE
-    /// separates its five emitters by up to 2 units front-to-back, and collapsing them together
-    /// turns a cloud into a single blob.
-    pub translation: glam::Vec3,
-    /// Euler rotation, radians. EDGE_ATTACK_DASH_HIT turns two of its emitters 90 degrees.
-    pub rotation: glam::Vec3,
-    pub color0: Vec<ColorKey>,
-    pub alpha0: Vec<ColorKey>,
-}
-
-fn attr(emitter: &EmitterDef, slots: &Slots, which: Option<usize>) -> Option<f32> {
-    let _ = slots;
-    match emitter.attrs.get(which?).and_then(|value| value.as_ref())? {
-        AttrValue::Int(v) => Some(*v as f32),
-        AttrValue::UInt(v) => Some(*v as f32),
-        AttrValue::Float(v) => Some(*v),
-    }
-}
-
-/// Attribute-table positions, looked up once per load rather than per emitter.
-pub struct Slots {
-    rate: Option<usize>,
-    rate_random: Option<usize>,
-    interval: Option<usize>,
-    interval_random: Option<usize>,
-    emission_start: Option<usize>,
-    emission_duration: Option<usize>,
-    is_one_time: Option<usize>,
-    is_world_gravity: Option<usize>,
-    position_random: Option<usize>,
-    air_res: Option<usize>,
-    momentum_random: Option<usize>,
-    diffusion_dir_angle: Option<usize>,
-    xz_diffusion: Option<usize>,
-    sweep_start_random: Option<usize>,
-    surface_pos_rand: Option<usize>,
-    num_divide_circle: [Option<usize>; 2],
-    num_divide_line: [Option<usize>; 2],
-    gravity_scale: Option<usize>,
-    gravity_dir: [Option<usize>; 3],
-    life: Option<usize>,
-    life_random: Option<usize>,
-    all_direction: Option<usize>,
-    designated_dir: [Option<usize>; 3],
-    designated_dir_scale: Option<usize>,
-    diffusion: [Option<usize>; 3],
-    velocity_random: Option<usize>,
-    scale: [Option<usize>; 3],
-    uv_div: [Option<usize>; 2],
-    uv_scroll: [Option<usize>; 2],
-    uv_scroll_add: [Option<usize>; 2],
-    uv_scale: [Option<usize>; 2],
-    uv_scale_add: [Option<usize>; 2],
-    volume_type: Option<usize>,
-    volume_radius: [Option<usize>; 3],
-    volume_form_scale: [Option<usize>; 3],
-    sweep_longitude: Option<usize>,
-    sweep_latitude: Option<usize>,
-    sweep_start: Option<usize>,
-    arc_type: Option<usize>,
-    latitude_dir: Option<usize>,
-    line_length: Option<usize>,
-    line_center: Option<usize>,
-    caliber_ratio: Option<usize>,
-    particle_scale: [Option<usize>; 3],
-    scale_random: [Option<usize>; 3],
-    primitive_id: Option<usize>,
-    translation: [Option<usize>; 3],
-    rotation: [Option<usize>; 3],
-    pattern_cells: Option<usize>,
-    pattern_frequency: Option<usize>,
-    pattern_table: Vec<Option<usize>>,
-    num_scale_keys: Option<usize>,
-    scale_keys: Vec<[Option<usize>; 4]>,
-    billboard_type: Option<usize>,
-    color_scale: Option<usize>,
-    alpha_input: Option<usize>,
-    color_input: Option<usize>,
-    shader_type: Option<usize>,
-    tex1_blend: Option<usize>,
-    blend_type: Option<usize>,
-    rotate_init: [Option<usize>; 3],
-    rotate_init_rand: [Option<usize>; 3],
-    rotate_add: [Option<usize>; 3],
-    rotate_add_rand: [Option<usize>; 3],
-    is_rotate: [Option<usize>; 3],
-    rotate_regist: Option<usize>,
-    follow_type: Option<usize>,
-    distance: [Option<usize>; 4],
-}
-
-impl Slots {
-    pub fn new() -> Self {
-        let table = crate::eff::fields::table();
-        let at = |id: &str| table.iter().position(|attr| attr.id == id);
-        Self {
-            rate: at("emission.rate"),
-            rate_random: at("emission.rate_random"),
-            interval: at("emission.interval"),
-            interval_random: at("emission.interval_random"),
-            is_one_time: at("emission.is_one_time"),
-            is_world_gravity: at("emission.is_world_gravity"),
-            air_res: at("emitter_static.air_res"),
-            momentum_random: at("particle_data.momentum_random"),
-            diffusion_dir_angle: at("particle_velocity.diffusion_dir_angle"),
-            xz_diffusion: at("particle_velocity.xz_diffusion"),
-            sweep_start_random: at("shape_info.sweep_start_random"),
-            arc_type: at("shape_info.arc_type"),
-            latitude_dir: at("shape_info.volume_latitude_dir"),
-            surface_pos_rand: at("shape_info.volume_surface_pos_rand"),
-            num_divide_circle: [
-                at("shape_info.num_divide_circle"),
-                at("shape_info.num_divide_circle_random"),
-            ],
-            num_divide_line: [
-                at("shape_info.num_divide_line"),
-                at("shape_info.num_divide_line_random"),
-            ],
-            emission_start: at("emission.start"),
-            emission_duration: at("emission.duration"),
-            position_random: at("emission.position_random"),
-            gravity_scale: at("emission.gravity_scale"),
-            gravity_dir: [
-                at("emission.gravity_dir_x"),
-                at("emission.gravity_dir_y"),
-                at("emission.gravity_dir_z"),
-            ],
-            life: at("particle_data.life"),
-            life_random: at("particle_data.life_random"),
-            all_direction: at("particle_velocity.all_direction"),
-            designated_dir: [
-                at("particle_velocity.designated_dir_x"),
-                at("particle_velocity.designated_dir_y"),
-                at("particle_velocity.designated_dir_z"),
-            ],
-            designated_dir_scale: at("particle_velocity.designated_dir_scale"),
-            diffusion: [
-                at("particle_velocity.diffusion_x"),
-                at("particle_velocity.diffusion_y"),
-                at("particle_velocity.diffusion_z"),
-            ],
-            velocity_random: at("particle_velocity.vel_random"),
-            scale: [
-                at("emitter_info.scale_x"),
-                at("emitter_info.scale_y"),
-                at("emitter_info.scale_z"),
-            ],
-            primitive_id: at("particle_data.primitive_id"),
-            translation: [
-                at("emitter_info.trans_x"),
-                at("emitter_info.trans_y"),
-                at("emitter_info.trans_z"),
-            ],
-            rotation: [
-                at("emitter_info.rotate_x"),
-                at("emitter_info.rotate_y"),
-                at("emitter_info.rotate_z"),
-            ],
-            pattern_cells: at("emitter_static.tex_pattern_anim0.num"),
-            pattern_frequency: at("emitter_static.tex_pattern_anim0.frequency"),
-            pattern_table: (0..32)
-                .map(|i| at(&format!("emitter_static.tex_pattern_anim0.table[{i}]")))
-                .collect(),
-            num_scale_keys: at("emitter_static.num_scale_keys"),
-            scale_keys: (0..8)
-                .map(|i| {
-                    [
-                        at(&format!("emitter_static.scale_anim.keys[{i}].x")),
-                        at(&format!("emitter_static.scale_anim.keys[{i}].y")),
-                        at(&format!("emitter_static.scale_anim.keys[{i}].z")),
-                        at(&format!("emitter_static.scale_anim.keys[{i}].time")),
-                    ]
-                })
-                .collect(),
-            uv_div: [
-                at("emitter_static.tex_scroll_anim0.uv_div_x"),
-                at("emitter_static.tex_scroll_anim0.uv_div_y"),
-            ],
-            uv_scroll: [
-                at("emitter_static.tex_scroll_anim0.scroll_x"),
-                at("emitter_static.tex_scroll_anim0.scroll_y"),
-            ],
-            uv_scroll_add: [
-                at("emitter_static.tex_scroll_anim0.scroll_add_x"),
-                at("emitter_static.tex_scroll_anim0.scroll_add_y"),
-            ],
-            uv_scale: [
-                at("emitter_static.tex_scroll_anim0.scale_x"),
-                at("emitter_static.tex_scroll_anim0.scale_y"),
-            ],
-            uv_scale_add: [
-                at("emitter_static.tex_scroll_anim0.scale_add_x"),
-                at("emitter_static.tex_scroll_anim0.scale_add_y"),
-            ],
-            volume_type: at("shape_info.volume_type"),
-            volume_radius: [
-                at("shape_info.volume_radius_x"),
-                at("shape_info.volume_radius_y"),
-                at("shape_info.volume_radius_z"),
-            ],
-            volume_form_scale: [
-                at("shape_info.volume_form_scale_x"),
-                at("shape_info.volume_form_scale_y"),
-                at("shape_info.volume_form_scale_z"),
-            ],
-            sweep_longitude: at("shape_info.sweep_longitude"),
-            sweep_latitude: at("shape_info.sweep_latitude"),
-            sweep_start: at("shape_info.sweep_start"),
-            line_length: at("shape_info.line_length"),
-            line_center: at("shape_info.line_center"),
-            caliber_ratio: at("shape_info.caliber_ratio"),
-            particle_scale: [
-                at("particle_scale.scale_x"),
-                at("particle_scale.scale_y"),
-                at("particle_scale.scale_z"),
-            ],
-            scale_random: [
-                at("particle_scale.scale_random_x"),
-                at("particle_scale.scale_random_y"),
-                at("particle_scale.scale_random_z"),
-            ],
-            billboard_type: at("particle_data.billboard_type"),
-            color_scale: at("emitter_static.color_scale"),
-            alpha_input: at("combiner.tex_alpha0_input_type"),
-            color_input: at("combiner.tex_color0_input_type"),
-            shader_type: at("combiner.shader_type"),
-            tex1_blend: at("combiner.texture1_color_blend"),
-            blend_type: at("render_state.blend_type"),
-            rotate_init: [
-                at("emitter_static.rotate_init_x"),
-                at("emitter_static.rotate_init_y"),
-                at("emitter_static.rotate_init_z"),
-            ],
-            rotate_init_rand: [
-                at("emitter_static.rotate_init_rand_x"),
-                at("emitter_static.rotate_init_rand_y"),
-                at("emitter_static.rotate_init_rand_z"),
-            ],
-            rotate_add: [
-                at("emitter_static.rotate_add_x"),
-                at("emitter_static.rotate_add_y"),
-                at("emitter_static.rotate_add_z"),
-            ],
-            rotate_add_rand: [
-                at("emitter_static.rotate_add_rand_x"),
-                at("emitter_static.rotate_add_rand_y"),
-                at("emitter_static.rotate_add_rand_z"),
-            ],
-            is_rotate: [
-                at("particle_data.is_rotate_x"),
-                at("particle_data.is_rotate_y"),
-                at("particle_data.is_rotate_z"),
-            ],
-            rotate_regist: at("emitter_static.rotate_regist"),
-            follow_type: at("emitter_info.follow_type"),
-            distance: [
-                at("emission.is_emit_dist_enabled"),
-                at("emission.emitter_dist_unit"),
-                at("emission.emitter_dist_min"),
-                at("emission.emitter_dist_max"),
-            ],
-        }
-    }
-}
-
-impl Default for Slots {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl EmitterSim {
-    pub fn read(emitter: &EmitterDef, slots: &Slots) -> Self {
-        let get = |which: Option<usize>| attr(emitter, slots, which);
-        let vec3 = |which: &[Option<usize>; 3]| {
-            glam::Vec3::new(
-                get(which[0]).unwrap_or(0.0),
-                get(which[1]).unwrap_or(0.0),
-                get(which[2]).unwrap_or(0.0),
-            )
+    pub fn read(emitter: &EmitterDef) -> Self {
+        let value = |id: &str| emitter.attrs.get(fields::index_of(id)?)?.as_ref();
+        let get = |id: &str| {
+            value(id).map(|v| match v {
+                AttrValue::Int(v) => *v as f32,
+                AttrValue::UInt(v) => *v as f32,
+                AttrValue::Float(v) => *v,
+            })
         };
-        let gravity_scale = get(slots.gravity_scale).unwrap_or(0.0);
+        let or = |id: &str, default: f32| get(id).unwrap_or(default);
+        let flag = |id: &str| or(id, 0.0) != 0.0;
+        let vec3 = |prefix: &str, default: f32| {
+            glam::Vec3::new(or(&format!("{prefix}x"), default), or(&format!("{prefix}y"), default), or(&format!("{prefix}z"), default))
+        };
+        let divide = |id: &str| (or(id, 1.0).max(1.0) as u32, or(&format!("{id}_random"), 0.0));
         Self {
-            // A rate of zero would emit nothing at all, which is almost never what the data
-            // means — it means the field was not populated for this emitter.
-            primitive_id: slots.primitive_id.and_then(|slot| {
-                match emitter.attrs.get(slot).and_then(|value| value.as_ref()) {
-                    Some(AttrValue::UInt(v)) => Some(*v),
-                    Some(AttrValue::Int(v)) if *v > 0 => Some(*v as u64),
-                    _ => None,
-                }
-            }),
-            translation: vec3(&slots.translation),
-            rotation: vec3(&slots.rotation),
-            rate: get(slots.rate).unwrap_or(1.0).max(0.0),
-            rate_random: get(slots.rate_random).unwrap_or(0.0),
-            interval: get(slots.interval).unwrap_or(0.0).max(0.0),
-            interval_random: get(slots.interval_random).unwrap_or(0.0).max(0.0),
-            emission_start: get(slots.emission_start).unwrap_or(0.0),
-            emission_duration: get(slots.emission_duration).unwrap_or(0.0),
-            is_one_time: get(slots.is_one_time).map(|v| v != 0.0),
-            world_gravity: get(slots.is_world_gravity).unwrap_or(0.0) != 0.0,
-            position_random: get(slots.position_random).unwrap_or(0.0),
+            rate: or("emission.rate", 1.0).max(0.0),
+            rate_random: or("emission.rate_random", 0.0),
+            interval: or("emission.interval", 0.0).max(0.0),
+            interval_random: or("emission.interval_random", 0.0).max(0.0),
+            emission_start: or("emission.start", 0.0),
+            emission_duration: or("emission.duration", 0.0),
+            is_one_time: get("emission.is_one_time").map(|v| v != 0.0),
+            position_random: or("emission.position_random", 0.0),
             // Zero is a real setting -- a handful of emitters use it to throw a particle one
             // step and leave it to gravity -- so only a missing field means "no drag".
-            air_res: get(slots.air_res).unwrap_or(1.0).max(0.0),
-            momentum_random: get(slots.momentum_random).unwrap_or(0.0),
-            diffusion_dir_angle: get(slots.diffusion_dir_angle).unwrap_or(0.0),
-            xz_diffusion: get(slots.xz_diffusion).unwrap_or(0.0),
-            sweep_start_random: get(slots.sweep_start_random).unwrap_or(0.0) != 0.0,
-            arc_type: get(slots.arc_type).unwrap_or(0.0) as i64,
-            // Unset is +Y, the pole the cap is built around.
-            latitude_dir: get(slots.latitude_dir).unwrap_or(2.0) as i64,
-            surface_pos_rand: get(slots.surface_pos_rand).unwrap_or(0.0),
-            num_divide_circle: (
-                get(slots.num_divide_circle[0]).unwrap_or(1.0).max(1.0) as u32,
-                get(slots.num_divide_circle[1]).unwrap_or(0.0),
-            ),
-            num_divide_line: (
-                get(slots.num_divide_line[0]).unwrap_or(1.0).max(1.0) as u32,
-                get(slots.num_divide_line[1]).unwrap_or(0.0),
-            ),
-            gravity: vec3(&slots.gravity_dir) * gravity_scale,
-            life: get(slots.life).unwrap_or(20.0).max(1.0),
-            life_random: get(slots.life_random).unwrap_or(0.0),
-            all_direction: get(slots.all_direction).unwrap_or(0.0),
-            designated_dir: vec3(&slots.designated_dir),
-            designated_dir_scale: get(slots.designated_dir_scale).unwrap_or(0.0),
-            diffusion: vec3(&slots.diffusion),
-            velocity_random: get(slots.velocity_random).unwrap_or(0.0),
-            color_scale: get(slots.color_scale).unwrap_or(1.0).max(0.0),
-            alpha_input: get(slots.alpha_input).unwrap_or(0.0) as i64,
-            color_input: get(slots.color_input).unwrap_or(0.0) as i64,
-            shader_type: get(slots.shader_type).unwrap_or(0.0) as i64,
-            tex1_blend: get(slots.tex1_blend).unwrap_or(0.0) as i64,
-            scale: {
-                let scale = vec3(&slots.scale);
-                // An all-zero scale draws nothing. Treated as "unset" rather than "invisible",
-                // because an emitter that renders nothing at all is not a shape the data uses.
-                if scale.length_squared() <= f32::EPSILON {
-                    glam::Vec3::ONE
-                } else {
-                    scale
-                }
-            },
-            uv_scroll: glam::Vec2::new(
-                get(slots.uv_scroll[0]).unwrap_or(0.0),
-                get(slots.uv_scroll[1]).unwrap_or(0.0),
-            ),
-            uv_scroll_add: glam::Vec2::new(
-                get(slots.uv_scroll_add[0]).unwrap_or(0.0),
-                get(slots.uv_scroll_add[1]).unwrap_or(0.0),
-            ),
-            uv_scale: {
-                let scale = glam::Vec2::new(
-                    get(slots.uv_scale[0]).unwrap_or(1.0),
-                    get(slots.uv_scale[1]).unwrap_or(1.0),
-                );
-                // A zero zoom is "unset", not "collapse the texture to one texel".
-                glam::Vec2::new(
-                    if scale.x.abs() <= f32::EPSILON { 1.0 } else { scale.x },
-                    if scale.y.abs() <= f32::EPSILON { 1.0 } else { scale.y },
-                )
-            },
-            uv_scale_add: glam::Vec2::new(
-                get(slots.uv_scale_add[0]).unwrap_or(0.0),
-                get(slots.uv_scale_add[1]).unwrap_or(0.0),
-            ),
-            uv_div: {
-                let axis = |slot| get(slot).unwrap_or(1.0).round().clamp(1.0, 64.0) as u32;
-                (axis(slots.uv_div[0]), axis(slots.uv_div[1]))
-            },
-            volume_type: get(slots.volume_type).unwrap_or(0.0) as i64,
+            air_res: or("emitter_static.air_res", 1.0).max(0.0),
+            momentum_random: or("particle_data.momentum_random", 0.0),
+            gravity: vec3("emission.gravity_dir_", 0.0) * or("emission.gravity_scale", 0.0),
+            life: or("particle_data.life", 20.0).max(1.0),
+            life_random: or("particle_data.life_random", 0.0),
+            all_direction: or("particle_velocity.all_direction", 0.0),
+            designated_dir: vec3("particle_velocity.designated_dir_", 0.0),
+            designated_dir_scale: or("particle_velocity.designated_dir_scale", 0.0),
+            diffusion: vec3("particle_velocity.diffusion_", 0.0),
+            velocity_random: or("particle_velocity.vel_random", 0.0),
+            diffusion_dir_angle: or("particle_velocity.diffusion_dir_angle", 0.0),
+            xz_diffusion: or("particle_velocity.xz_diffusion", 0.0),
+            volume_type: or("shape_info.volume_type", 0.0) as i64,
             // The shape's own per-axis stretch multiplies its radius (0x8dc80).
-            volume_radius: vec3(&slots.volume_radius)
-                * glam::Vec3::new(
-                    get(slots.volume_form_scale[0]).unwrap_or(1.0),
-                    get(slots.volume_form_scale[1]).unwrap_or(1.0),
-                    get(slots.volume_form_scale[2]).unwrap_or(1.0),
-                ),
-            sweep_longitude: get(slots.sweep_longitude).unwrap_or(std::f32::consts::TAU),
-            sweep_latitude: get(slots.sweep_latitude).unwrap_or(std::f32::consts::PI),
-            sweep_start: get(slots.sweep_start).unwrap_or(0.0),
-            line_length: get(slots.line_length).unwrap_or(0.0),
-            line_center: get(slots.line_center).unwrap_or(0.0),
-            caliber_ratio: get(slots.caliber_ratio).unwrap_or(1.0),
+            volume_radius: vec3("shape_info.volume_radius_", 0.0) * vec3("shape_info.volume_form_scale_", 1.0),
+            sweep_longitude: or("shape_info.sweep_longitude", std::f32::consts::TAU),
+            sweep_latitude: or("shape_info.sweep_latitude", std::f32::consts::PI),
+            sweep_start: or("shape_info.sweep_start", 0.0),
+            arc_type: or("shape_info.arc_type", 0.0) as i64,
+            // Unset is +Y, the pole the cap is built around.
+            latitude_dir: or("shape_info.volume_latitude_dir", 2.0) as i64,
+            line_length: or("shape_info.line_length", 0.0),
+            line_center: or("shape_info.line_center", 0.0),
+            caliber_ratio: or("shape_info.caliber_ratio", 1.0),
+            sweep_start_random: flag("shape_info.sweep_start_random"),
+            surface_pos_rand: or("shape_info.volume_surface_pos_rand", 0.0),
+            num_divide_circle: divide("shape_info.num_divide_circle"),
+            num_divide_line: divide("shape_info.num_divide_line"),
             particle_scale: {
-                let scale = vec3(&slots.particle_scale);
+                let scale = vec3("particle_scale.scale_", 0.0);
                 // An unset base is 1, so the curve and emitter scale still decide the size,
                 // rather than the particle collapsing to nothing.
-                if scale.length_squared() <= f32::EPSILON {
-                    glam::Vec3::ONE
-                } else {
-                    scale
-                }
+                if scale.length_squared() <= f32::EPSILON { glam::Vec3::ONE } else { scale }
             },
-            scale_random: vec3(&slots.scale_random),
-            scale_keys: {
-                let count = get(slots.num_scale_keys).unwrap_or(0.0).max(0.0) as usize;
-                slots
-                    .scale_keys
-                    .iter()
-                    .take(count.min(8))
-                    .filter_map(|key| {
-                        Some((
-                            get(key[3])?,
-                            glam::Vec3::new(get(key[0])?, get(key[1])?, get(key[2])?),
-                        ))
-                    })
-                    .collect()
-            },
-            pattern_cells: get(slots.pattern_cells).unwrap_or(0.0).max(0.0) as u32,
-            pattern_frequency: get(slots.pattern_frequency).unwrap_or(1.0).max(1.0),
-            sheet_cells: 0,
-            pattern_table: slots
-                .pattern_table
-                .iter()
-                .filter_map(|slot| get(*slot).map(|v| v as i32))
-                .collect(),
-            billboard_type: emitter
-                .attrs
-                .get(slots.billboard_type.unwrap_or(usize::MAX))
-                .and_then(|value| value.as_ref())
-                .map(|value| match value {
-                    AttrValue::Int(v) => *v,
-                    AttrValue::UInt(v) => *v as i64,
-                    AttrValue::Float(v) => *v as i64,
-                })
-                .unwrap_or(0),
-            blend_type: emitter
-                .attrs
-                .get(slots.blend_type.unwrap_or(usize::MAX))
-                .and_then(|value| value.as_ref())
-                .map(|value| match value {
-                    AttrValue::Int(v) => *v,
-                    AttrValue::UInt(v) => *v as i64,
-                    AttrValue::Float(v) => *v as i64,
-                })
-                .unwrap_or(0),
-            rotate_init: vec3(&slots.rotate_init),
-            rotate_init_rand: vec3(&slots.rotate_init_rand),
-            rotate_add: vec3(&slots.rotate_add),
-            rotate_add_rand: vec3(&slots.rotate_add_rand),
-            rotate_enabled: [
-                get(slots.is_rotate[0]).unwrap_or(0.0) != 0.0,
-                get(slots.is_rotate[1]).unwrap_or(0.0) != 0.0,
-                get(slots.is_rotate[2]).unwrap_or(0.0) != 0.0,
-            ],
-            rotate_regist: get(slots.rotate_regist).unwrap_or(0.0),
-            follow_type: get(slots.follow_type).unwrap_or(0.0) as i64,
-            distance: (get(slots.distance[0]).unwrap_or(0.0) != 0.0).then(|| Distance {
-                unit: get(slots.distance[1]).unwrap_or(1.0).max(0.01),
-                min: get(slots.distance[2]).unwrap_or(0.0).max(0.0),
-                max: get(slots.distance[3]).unwrap_or(0.0).max(0.0),
+            scale_random: vec3("particle_scale.scale_random_", 0.0),
+            rotate_init: vec3("emitter_static.rotate_init_", 0.0),
+            rotate_enabled: ["x", "y", "z"].map(|axis| flag(&format!("particle_data.is_rotate_{axis}"))),
+            follow_type: or("emitter_info.follow_type", 0.0) as i64,
+            distance: flag("emission.is_emit_dist_enabled").then(|| Distance {
+                unit: or("emission.emitter_dist_unit", 1.0).max(0.01),
+                min: or("emission.emitter_dist_min", 0.0).max(0.0),
+                max: or("emission.emitter_dist_max", 0.0).max(0.0),
             }),
-            color0: emitter.color0.clone(),
-            alpha0: emitter.alpha0_keys.clone(),
+            primitive_id: match value("particle_data.primitive_id") {
+                Some(AttrValue::UInt(v)) => Some(*v),
+                Some(AttrValue::Int(v)) if *v > 0 => Some(*v as u64),
+                _ => None,
+            },
         }
     }
 
@@ -857,11 +384,6 @@ fn travel(v0: glam::Vec3, gravity: glam::Vec3, drag: f32, age: f32) -> (glam::Ve
     (offset, velocity)
 }
 
-
-
-
-
-
 /// Cap on particles produced by one emitter in one evaluation.
 ///
 /// A continuous emitter with a high rate, evaluated late in a long move, describes an unbounded
@@ -1008,7 +530,7 @@ fn volume_spawn(
 
 /// A particle as it is born: its life, where it appears and how it is thrown, all in the emitter's frame. Everything
 /// after birth is a function of these and its age, which is what both the CPU evaluation here and the game's own
-/// vertex shaders (fed by [`spawns`]) do with them.
+/// vertex shaders (fed by [`spawns_moving`]) do with them.
 struct Initial {
     life: f32,
     spawn: glam::Vec3,
@@ -1074,7 +596,7 @@ fn initial(sim: &EmitterSim, burst: &Burst, slot: u32, id: u64, seed: u64) -> In
     Initial { life, spawn, velocity, pace }
 }
 
-/// A live particle as the game's effect shaders take it (eff_gpu): the vertex inputs `sysLocalPosAttr` (position,
+/// A live particle as the game's effect shaders take it (`draw::gpu`): the vertex inputs `sysLocalPosAttr` (position,
 /// life), `sysLocalVecAttr` (velocity, birth), `sysScaleAttr`, `sysRandomAttr` and `sysInitRotateAttr`.
 ///
 /// Measured against the game's own streams (the recomp capture): position and velocity are the particle's CURRENT
@@ -1088,16 +610,17 @@ pub struct Spawn {
     pub position: glam::Vec3,
     pub life: f32,
     pub velocity: glam::Vec3,
-    /// Frames on the effect's clock (the same clock as `evaluate`'s `age_frames`) when it was born.
+    /// Frames on the effect's clock (the same clock as `spawns_moving`'s `age_frames`) when it was born.
     pub birth: f32,
     pub scale: glam::Vec3,
     pub random: [f32; 4],
     pub rotation: glam::Vec3,
 }
 
-
-/// [`spawns`] for an emitter that moves: `travelled(t)`, how far it has gone by frame `t` of the effect, drives a
-/// distance emitter. Without it a distance emitter fires on the clock instead, so a still preview shows something.
+/// Every live particle of an emitter at `age_frames` into the effect, newest first, at most [`MAX_PER_EMITTER`].
+///
+/// `travelled(t)`, how far a moving emitter has gone by frame `t` of the effect, drives a distance emitter. Without it
+/// a distance emitter fires on the clock instead, so a still preview shows something.
 pub fn spawns_moving(sim: &EmitterSim, age_frames: f32, seed: u64, travelled: Option<&dyn Fn(f32) -> f32>) -> Vec<Spawn> {
     let mut out = Vec::new();
     if age_frames < sim.emission_start {
@@ -1124,13 +647,13 @@ pub fn spawns_moving(sim: &EmitterSim, age_frames: f32, seed: u64, travelled: Op
             if age >= life {
                 continue;
             }
-            // Where it is now and how fast it is going, as evaluate has it.
+            // Where it is now and how fast it is going.
             let (travelled, heading) = travel(velocity, glam::Vec3::ZERO, sim.air_res, age);
             let (fallen, falling) = travel(glam::Vec3::ZERO, sim.gravity, sim.air_res, age);
             let shrink = 1.0 - sim.scale_random.x / 100.0 * hashed(seed, id ^ 0x91);
             // The initial angle only: the game's vertex shaders add the random spread themselves,
             // (sysRandomAttr - 0.5) * rotate_init_rand from the emitter block (c9[452..454]), so a spread baked in here is
-            // applied twice. Captured particles carry exactly rotate_init (Visionary 858dc51).
+            // applied twice. Captured particles carry exactly rotate_init.
             let mut rotation = glam::Vec3::ZERO;
             for axis in 0..3 {
                 if sim.rotate_enabled[axis] {

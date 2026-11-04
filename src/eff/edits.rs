@@ -8,9 +8,8 @@ pub struct EffMod {
     pub source_rel: String,
     #[serde(default)]
     pub authored: Vec<AuthoredEdit>,
-    /// Emitter sets copied in from a donor eff. Serialized as `one_slot` before the
-    /// transplant/one-slot split; the alias keeps pre-split projects loadable.
-    #[serde(default, alias = "one_slot")]
+    /// Emitter sets copied in from a donor eff.
+    #[serde(default)]
     pub transplants: Vec<TransplantOp>,
     /// Pool textures the user replaced with their own image.
     #[serde(default)]
@@ -31,9 +30,6 @@ pub struct EffMod {
     pub entry_edits: Vec<EntryEdit>,
 }
 
-impl EffMod {
-}
-
 /// The emitter list one effect should end up with.
 ///
 /// Declarative rather than a log of add/remove operations: each slot names an emitter of the
@@ -42,7 +38,7 @@ impl EffMod {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmitterRoster {
     pub set_name: String,
-    /// The entry (kind) name that plays this set, for the UI and for carrier retargeting.
+    /// The entry (kind) name that plays this set, for the panel.
     #[serde(default)]
     pub entry_name: String,
     pub set_idx: usize,
@@ -118,13 +114,11 @@ pub struct ModelEdit {
 
 /// One pool texture replaced by an image of the user's.
 ///
-/// Keyed by texture NAME, not pool index: the carrier and the exported eff both rebuild their
-/// pools (pruning drops everything unreferenced), so an index recorded against the editor's
-/// view names a different texture by the time it is applied. Names survive that.
+/// Keyed by texture NAME, not pool index: a rebuild can change the pool (additions, removals),
+/// so an index names a different texture by the time it is applied. Names survive that.
 ///
-/// The PNG is referenced by path rather than embedded, so the project file stays small and a
-/// rebuild picks up whatever the image file says now — edit it in your paint program, send
-/// again, and the new pixels ship without re-importing.
+/// The PNG is referenced by path rather than embedded, so a rebuild picks up whatever the image
+/// file says now — edit it in your paint program and rebuild, without re-importing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextureImport {
     pub texture_name: String,
@@ -133,8 +127,7 @@ pub struct TextureImport {
     ///
     /// Recorded per import because the two are not interchangeable: reading an editable image as
     /// raw (or the reverse) puts the shape in the wrong channel, which the game draws as a solid
-    /// square. Defaults to false, so a project written before this field existed is read as
-    /// editable — the only form there was.
+    /// square. Defaults to false: editable.
     #[serde(default)]
     pub raw: bool,
 }
@@ -161,8 +154,7 @@ pub struct TextureAddition {
     pub raw: bool,
 }
 
-/// One emitter's edited authored fields. Names are stored alongside indices; appliers
-/// prefer the name match and fall back to the index with a warning (dump-revision drift).
+/// One emitter's changed values. The set and emitter are named and indexed; the writer prefers the name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthoredEdit {
     /// The EMITTER SET name (e.g. `P_KirbyDash`) — what `apply_authored` matches against
@@ -173,9 +165,8 @@ pub struct AuthoredEdit {
     /// and what an effect alias hashes. The two are related by
     /// `entries[i].emitter_set_id - 1 == set_idx`, not by position.
     ///
-    /// Empty on projects saved before this field existed; callers that need a kind name must
-    /// skip such edits rather than fall back to `set_name`, which would name a kind that does
-    /// not exist and ship a carrier the game's loader can hang on.
+    /// May be empty; callers that need a kind name must skip such edits rather than fall back to
+    /// `set_name`, which would name a kind that does not exist.
     #[serde(default)]
     pub entry_name: String,
     pub set_idx: usize,
@@ -184,72 +175,22 @@ pub struct AuthoredEdit {
     pub fields: EmitterFieldEdits,
 }
 
-/// Absolute new values (pristine values are re-derivable from the source eff).
-///
-/// `attrs` is the general case and covers every field of the emitter; it is keyed by the stable
-/// ids in [`crate::eff::fields`]. The named fields below it predate that table and are kept for
-/// projects saved before it existed — the editor re-records them as `attrs` the first time it
-/// loads such a project, and both paths are applied (named first, so `attrs` wins a tie).
+/// New values for one emitter.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EmitterFieldEdits {
-    /// Attribute id → new value, e.g. `"emission.rate": 12.5`.
+    /// Field id → new value, e.g. `"emission.rate": 12.5` (ids from [`crate::eff::fields`]).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub attrs: std::collections::BTreeMap<String, crate::eff::fields::AttrValue>,
-    /// Sparse byte edits to emitter child sections. The section index disambiguates repeated
-    /// magic values; the magic prevents a changed source file from applying bytes to the wrong
-    /// section. Storing only changed offsets keeps projects small and avoids embedding source
-    /// subsection blobs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subsections: Vec<SubsectionEdit>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emission_rate: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifetime: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scale: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color_scale: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emitter_scale: Option<[f32; 3]>,
-    /// Color key rows: [r, g, b, time]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color0: Option<Vec<[f32; 4]>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color1: Option<Vec<[f32; 4]>>,
-    /// Alpha key rows: [value, time]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alpha0: Option<Vec<[f32; 2]>>,
     /// Pool texture NAME this emitter's `sampler0` should read instead of its original one.
     ///
-    /// A name rather than the picker's index: the index is against the editor's view of the
-    /// merged eff, and every path that ships these bytes rebuilds its own pool — the carrier
-    /// prunes everything unreferenced, so indices there mean something else entirely.
+    /// A name rather than the picker's index: a rebuild can change the pool, so an index
+    /// would name a different texture by then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SubsectionEdit {
-    pub index: usize,
-    pub magic: String,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub bytes: std::collections::BTreeMap<usize, u8>,
-}
-
-impl EmitterFieldEdits {
-
-}
-
-
-/// A TRANSPLANT: copy an emitter set from a donor eff into this fighter's eff, either
-/// under a new entry name or replacing an existing entry in place.
-///
-/// `one_slot_slots` is the (optional) ONE-SLOT scoping layered on top of the transplant —
-/// the transplant is the operation, the slot list narrows which costumes see it.
-///
-/// Was named `OneSlotOp` before the transplant/one-slot split. The struct name is invisible
-/// to serde, but the renamed `one_slot_slots` field carries a `serde(alias)` for its old
-/// on-disk name (`slots`) so projects saved before the split still load.
+/// A TRANSPLANT: copy an emitter set from a donor eff into this one, either under a new entry name or replacing an
+/// existing entry in place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransplantOp {
     pub new_entry_name: String,
@@ -257,16 +198,8 @@ pub struct TransplantOp {
     pub src_file_rel: String,
     pub src_set_name: String,
     pub src_set_idx: usize,
-    /// ONE-SLOT scoping: costume slots this transplant applies to (0 = c00 …). Slot numbers
-    /// are real costume indices and are NOT limited to 0–7 — added-costume mods use much
-    /// larger ones. Empty = every costume: the transplant lands in the base
-    /// ef_<fighter>.eff; otherwise it lands in ef_<fighter>_cXX.eff files, one per slot.
-    /// Serialized as `slots` before the transplant/one-slot split.
-    #[serde(default, alias = "slots", skip_serializing_if = "Vec::is_empty")]
-    pub one_slot_slots: Vec<u8>,
-    /// When set, the donor REPLACES this existing entry's emitter set(s) in place — every
-    /// use switches, with no ACMD redirect needed — instead of being appended as a new
-    /// entry. This is how a one-slot-scoped transplant is normally authored.
+    /// When set, the donor REPLACES this existing entry's emitter set(s) in place (every use switches, with no ACMD
+    /// redirect needed) instead of being appended as a new entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace_entry: Option<String>,
 }
