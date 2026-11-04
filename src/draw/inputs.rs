@@ -204,8 +204,6 @@ pub fn mesh_inputs(reflection: &Reflection, mesh: &crate::eff::mesh_io::MeshData
 /// One emitter of a live effect, this frame, for the game's shaders.
 #[derive(Clone)]
 pub struct GameDraw {
-    /// The effect file: whose shaders draw it ([`crate::draw::shaders`]).
-    pub file: std::path::PathBuf,
     pub emitter: GameEmitter,
     pub dynamic: Dynamic,
     pub spawns: Vec<crate::draw::sim::Spawn>,

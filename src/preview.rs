@@ -136,7 +136,7 @@ impl Preview {
                 let pixels = self.pixels.entry(index).or_insert_with(|| decode_for_sampling(pool, index, name).ok().map(Arc::new)).clone()?;
                 Some((TextureKey { file: file.clone(), index }, pixels))
             });
-            out.push((index, GameDraw { file: file.clone(), emitter: game, dynamic, spawns: spawned, mesh, textures }));
+            out.push((index, GameDraw { emitter: game, dynamic, spawns: spawned, mesh, textures }));
         }
         out
     }
@@ -276,9 +276,7 @@ impl Preview {
             cbufs.push((FRAGMENT, 8, &camera));
             let inputs = DrawInputs {
                 variation: ready.variation, cbufs, vertices: ready.vertices, indices: ready.indices, state: ready.state,
-                // every captured effect draw had the alpha test off
-                alpha_func: 8, alpha_ref: 0.0, count: ready.count, instances: ready.instances, first: 0, base_vertex: 0,
-                base_instance: 0, textures,
+                count: ready.count, instances: ready.instances, textures,
             };
             match renderer.prepare(&device, &inputs, format, None) {
                 Ok(draw) => prepared.push((*index, draw)),

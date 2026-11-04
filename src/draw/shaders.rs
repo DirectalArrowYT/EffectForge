@@ -15,7 +15,8 @@ use anyhow::{anyhow, Context, Result};
 pub enum State {
     Ready(PathBuf),
     Building,
-    Failed(String),
+    /// Translating them failed; the reason is in the log.
+    Failed,
 }
 
 #[derive(Default)]
@@ -163,8 +164,10 @@ impl ShaderCache {
             *state.lock().unwrap() = match result {
                 Ok(dir) => State::Ready(dir),
                 Err(e) => {
-                    eprintln!("[eff] the game's shaders for {} are not available: {e:#}", path.display());
-                    State::Failed(format!("{e:#}"))
+                    let line = format!("the game's shaders for {} are not available: {e:#}", path.display());
+                    eprintln!("[eff] {line}");
+                    crate::log::note(&line);
+                    State::Failed
                 }
             };
         });

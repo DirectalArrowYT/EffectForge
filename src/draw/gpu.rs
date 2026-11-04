@@ -30,6 +30,9 @@ const SAMPLER_SPLIT: u32 = 64;
 /// c2, the driver's texture table (handles, then texture sizes from word 96): no translated effect shader reads it,
 /// but the fragment stages declare it.
 const TEXTURE_TABLE_BYTES: usize = 896;
+/// The alpha test / point size block: function 8 (always passes), reference 0, point size 1. Every captured effect
+/// draw had the alpha test off.
+const ALPHA_TEST_OFF: [u32; 4] = [8, 0, 0x3f80_0000, 0];
 
 /// A texture unit one stage samples, and the binding of its texture (the sampler is `SAMPLER_SPLIT` above).
 #[derive(Clone, Copy, Debug)]
@@ -48,46 +51,28 @@ pub struct StageInfo {
     pub samplers: Vec<SamplerSlot>,
     /// c1: the program's constant data, from its code section.
     pub constants: Vec<u8>,
-    /// The program's reflection (the BNSH's names): vertex inputs by name -> location (`sysLocalPosAttr` ...),
-    /// samplers by name -> texture unit (`sysTextureSampler0`, `sysDepthBufferTexture` ...), and constant buffers by
-    /// name -> NVN slot (`sysEmitterDynamicUniformBlock` ...; the shader reads slot n as c(n + 3)).
+    /// The vertex inputs' names in the program's reflection (`sysLocalPosAttr` ...), with their locations.
     pub reflection: Reflection,
-    code_hash: u64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Reflection {
     pub inputs: Vec<(String, i32)>,
-    pub samplers: Vec<(String, i32)>,
-    pub constant_buffers: Vec<(String, i32)>,
 }
 
 impl Reflection {
     fn read(path: &Path) -> Self {
         let Ok(text) = std::fs::read(path) else { return Self::default() };
         let Ok(json) = serde_json::from_slice::<serde_json::Value>(&text) else { return Self::default() };
-        let list = |key: &str| -> Vec<(String, i32)> {
-            json[key]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|p| Some((p[0].as_str()?.to_string(), p[1].as_i64()? as i32)))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        Self { inputs: list("inputs"), samplers: list("samplers"), constant_buffers: list("constant_buffers") }
+        let inputs = json["inputs"].as_array().map_or_else(Vec::new, |a| {
+            a.iter().filter_map(|p| Some((p[0].as_str()?.to_string(), p[1].as_i64()? as i32))).collect()
+        });
+        Self { inputs }
     }
 
     pub fn input(&self, name: &str) -> Option<u32> {
         self.inputs.iter().find(|(n, _)| n == name).and_then(|&(_, l)| u32::try_from(l).ok())
     }
-
-
-}
-
-fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 fn le_u32(b: &[u8], at: usize) -> Option<u32> {
@@ -99,7 +84,6 @@ fn le_u32(b: &[u8], at: usize) -> Option<u32> {
 pub struct ShaderLibrary {
     dir: PathBuf,
     stages: HashMap<(u32, u32), StageInfo>,
-    by_code: HashMap<(u32, u64), Vec<u32>>,
 }
 
 impl ShaderLibrary {
@@ -110,7 +94,6 @@ impl ShaderLibrary {
         )?;
         let variations = index["variations"].as_object().ok_or_else(|| anyhow!("{}: no variations", index_path.display()))?;
         let mut stages = HashMap::new();
-        let mut by_code: HashMap<(u32, u64), Vec<u32>> = HashMap::new();
         for (key, v) in variations {
             let variation: u32 = key.parse()?;
             for (stage, name, file_stage) in [(VERTEX, "vs", 0), (FRAGMENT, "fs", 4)] {
@@ -124,14 +107,8 @@ impl ShaderLibrary {
                 let (Ok(code), Ok(ctl)) = (std::fs::read(base.with_extension("code")), std::fs::read(base.with_extension("ctl"))) else {
                     continue;
                 };
-                let (len, c_size, c_off) = (
-                    le_u32(&ctl, 0x6f8).unwrap_or(0) as usize,
-                    le_u32(&ctl, 0x6fc).unwrap_or(0) as usize,
-                    le_u32(&ctl, 0x700).unwrap_or(0) as usize,
-                );
-                // The program as the game binds it: `len` bytes from the program header (+0x30 of the section) on,
-                // header included. A captured program is matched by exactly these bytes (`Program::bytes`).
-                let program = code.get(0x30..0x30 + len).ok_or_else(|| anyhow!("{}: short code", base.display()))?;
+                // The control section says where the program's constant data (c1) sits in its code.
+                let (c_size, c_off) = (le_u32(&ctl, 0x6fc).unwrap_or(0) as usize, le_u32(&ctl, 0x700).unwrap_or(0) as usize);
                 let info = StageInfo {
                     cbufs: s["cbufs"].as_u64().unwrap_or(0) as u32,
                     inputs: s["in"].as_u64().unwrap_or(0) as u32,
@@ -148,20 +125,16 @@ impl ShaderLibrary {
                         .unwrap_or_default(),
                     constants: code.get(c_off..c_off + c_size).map(|c| c.to_vec()).unwrap_or_default(),
                     reflection: Reflection::read(&dir.join(format!("v{variation:04}_s{file_stage}.reflect.json"))),
-                    code_hash: fnv(program),
                 };
-                by_code.entry((stage, info.code_hash)).or_default().push(variation);
                 stages.insert((variation, stage), info);
             }
         }
-        Ok(Self { dir: dir.to_path_buf(), stages, by_code })
+        Ok(Self { dir: dir.to_path_buf(), stages })
     }
 
     pub fn stage(&self, variation: u32, stage: u32) -> Option<&StageInfo> {
         self.stages.get(&(variation, stage))
     }
-
-
 
     fn wgsl(&self, variation: u32, stage: u32) -> Result<String> {
         let path = self.dir.join("wgsl").join(format!("v{variation:04}_s{}.wgsl", if stage == VERTEX { 0 } else { 4 }));
@@ -222,13 +195,8 @@ pub struct DrawInputs<'a> {
     pub vertices: Vec<VertexInput>,
     pub indices: Option<Vec<u32>>,
     pub state: DrawState,
-    pub alpha_func: i32,
-    pub alpha_ref: f32,
     pub count: u32,
     pub instances: u32,
-    pub first: u32,
-    pub base_vertex: i32,
-    pub base_instance: u32,
     pub textures: Vec<TextureInput<'a>>,
 }
 
@@ -240,9 +208,6 @@ pub struct PreparedDraw {
     index: Option<wgpu::Buffer>,
     count: u32,
     instances: u32,
-    first: u32,
-    base_vertex: i32,
-    base_instance: u32,
 }
 
 impl PreparedDraw {
@@ -253,13 +218,12 @@ impl PreparedDraw {
         for (slot, buffer) in self.vertex_buffers.iter().enumerate() {
             pass.set_vertex_buffer(slot as u32, buffer.slice(..));
         }
-        let instances = self.base_instance..self.base_instance + self.instances;
         match &self.index {
             Some(index) => {
                 pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(self.first..self.first + self.count, self.base_vertex, instances);
+                pass.draw_indexed(0..self.count, 0, 0..self.instances);
             }
-            None => pass.draw(self.first..self.first + self.count, instances),
+            None => pass.draw(0..self.count, 0..self.instances),
         }
     }
 }
@@ -590,10 +554,9 @@ impl GameEffectRenderer {
                     usage: wgpu::BufferUsages::STORAGE,
                 })));
             }
-            let mxpc: [u32; 4] = [inputs.alpha_func as u32, inputs.alpha_ref.to_bits(), 1f32.to_bits(), 0];
             buffers.push((MXPC_BINDING[stage as usize], device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("game effect alpha test"),
-                contents: bytemuck::cast_slice(&mxpc),
+                contents: bytemuck::cast_slice(&ALPHA_TEST_OFF),
                 usage: wgpu::BufferUsages::STORAGE,
             })));
         }
@@ -637,9 +600,6 @@ impl GameEffectRenderer {
             index,
             count: inputs.count,
             instances: inputs.instances.max(1),
-            first: inputs.first,
-            base_vertex: inputs.base_vertex,
-            base_instance: inputs.base_instance,
         })
     }
 }
@@ -696,14 +656,4 @@ pub fn upload_sampled(
             &data,
         )
         .create_view(&Default::default())
-}
-
-
-
-
-
-impl DrawState {
-}
-
-impl SamplerKey {
 }
