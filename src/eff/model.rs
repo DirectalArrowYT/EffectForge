@@ -130,7 +130,7 @@ pub struct LoadedEffect {
     /// editing — `PtclFile` only carries what a texture IS, not its pixels.
     pub texture_pool: Option<Vec<u8>>,
     /// Per emitter set, per emitter in `ptcl`'s flattened order: what drawing it with the game's own shaders needs
-    /// (eff_game). `None` for an emitter the game path cannot draw.
+    /// (`draw::inputs`). `None` for an emitter the game path cannot draw.
     pub game: Vec<Vec<Option<crate::draw::inputs::GameEmitter>>>,
 }
 

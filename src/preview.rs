@@ -103,7 +103,7 @@ impl Preview {
             let Some(game) = doc.loaded.game.get(set_idx).and_then(|set| set.get(index)).cloned().flatten() else { continue };
             let sim = EmitterSim::read(emitter);
             let seed = (set_idx as u64) << 32 ^ (index as u64) << 8;
-            let (local, local_rt) = crate::draw::inputs::emitter_local(&game.stored);
+            let (local, local_rt) = game.local;
             let speed = SWING_RADIUS * std::f32::consts::TAU / SWING_FRAMES;
             let travelled = |t: f32| t * speed;
             let mut spawned = spawns_moving(&sim, self.age, seed, self.swing.then_some(&travelled as &dyn Fn(f32) -> f32));

@@ -5,7 +5,7 @@
 //! all, its code is cut into blocks at every branch target and runs as `loop { switch pc { ... } }`. SSY / SYNC (the
 //! hardware's reconvergence stack) is resolved statically: each SYNC jumps to the SSY target in force where it is.
 //!
-//! Interface (the binding layout eff_gpu builds):
+//! Interface (the binding layout `draw::gpu` builds):
 //! * set 0: constant buffer `c<n>` of the vertex stage at binding n, the fragment stage's at 20 + n, each a read-only
 //!   storage buffer of `u32`; the fragment stage's alpha test block (func, ref, point size, 0) at 39.
 //! * set 1: texture unit u of the fragment stage at binding u, of the vertex stage at 32 + u; its sampler 64 above.

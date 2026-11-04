@@ -1,4 +1,4 @@
-//! Effect Forge's own inputs for the game's effect shaders (eff_gpu).
+//! Effect Forge's own inputs for the game's effect shaders, drawn by [`crate::draw::gpu`].
 //!
 //! Every input a captured effect draw binds, rebuilt from the .eff, the effect's placement and its clock, so the
 //! game's shaders can draw an effect the game never ran. Each was checked against the game's own, captured from the recomp:
@@ -8,21 +8,18 @@
 //! * c10, `sysEmitterDynamicUniformBlock`: [`dynamic_block`]: the effect's colour, the emitter's clock and particle
 //!   count, and its matrix (placement x the emitter's own transform from emitter_info).
 //! * c13 / c16, the custom shader blocks: the game's global values ([`RESERVED_PARAM`], [`CUSTOM_BLOCK2`]).
-//! * vertex inputs: [`particle_inputs`], each particle as born ([`crate::draw::sim::spawns`]), routed to the
+//! * vertex inputs: [`particle_inputs`], each particle as born ([`crate::draw::sim::spawns_moving`]), routed to the
 //!   shader's own attribute names (its reflection).
 //! * blend / depth / cull: [`draw_state`], from render_state.
 
 use crate::draw::gpu::{DrawState, Reflection, VertexInput};
 
-fn f32_at(b: &[u8], at: usize) -> f32 {
-    f32::from_le_bytes(b[at..at + 4].try_into().unwrap())
-}
-
-/// The emitter's own transform within its effect (emitter_info): translate, then rotate (radians, Z then Y then X,
-/// the order that fits the game's matrices best), then scale.
-pub fn emitter_local(stored: &[u8]) -> (glam::Mat4, glam::Mat4) {
-    let v = |at: usize| glam::Vec3::new(f32_at(stored, at), f32_at(stored, at + 4), f32_at(stored, at + 8));
-    let (t, r, s) = (v(0x770), v(0x788), v(0x7a0));
+/// The emitter's own transform within its effect (emitter_info), with and without its scale: translate, then rotate
+/// (radians, Z then Y then X, the order that fits the game's matrices best), then scale.
+fn emitter_local(info: &effect_library::EmitterInfo) -> (glam::Mat4, glam::Mat4) {
+    let t = glam::Vec3::new(info.trans_x, info.trans_y, info.trans_z);
+    let r = glam::Vec3::new(info.rotate_x, info.rotate_y, info.rotate_z);
+    let s = glam::Vec3::new(info.scale_x, info.scale_y, info.scale_z);
     let rotation = glam::Mat4::from_rotation_z(r.z) * glam::Mat4::from_rotation_y(r.y) * glam::Mat4::from_rotation_x(r.x);
     let rt = glam::Mat4::from_translation(t) * rotation;
     (rt * glam::Mat4::from_scale(s), rt)
@@ -75,13 +72,13 @@ pub const CUSTOM_BLOCK2: [f32; 24] = [
 /// Blend, depth and culling from the emitter's render_state, as the game set them (every captured draw):
 /// blend_type 0 alpha, 1 additive, 2 subtractive; is_depth_mask 0 = depth tested, not written, 1 = no depth test;
 /// display_side 1 / 2 culls. `prim` and `indexed` are the draw's own.
-pub fn draw_state(stored: &[u8], prim: u32, indexed: bool) -> DrawState {
+pub fn draw_state(emitter: &GameEmitter, prim: u32, indexed: bool) -> DrawState {
     const SRC_ALPHA: u32 = 0x302;
     const ONE_MINUS_SRC_ALPHA: u32 = 0x303;
     const ONE: u32 = 1;
     const ADD: u32 = 0x8006;
     const REVERSE_SUBTRACT: u32 = 0x800B;
-    let (dst, eq) = match stored[0x89e] {
+    let (dst, eq) = match emitter.blend_type {
         1 => (ONE, ADD),
         2 => (ONE, REVERSE_SUBTRACT),
         _ => (ONE_MINUS_SRC_ALPHA, ADD),
@@ -91,7 +88,7 @@ pub fn draw_state(stored: &[u8], prim: u32, indexed: bool) -> DrawState {
         indexed,
         // The alpha channel's own blend (ZERO * src + DST_ALPHA * dst) keeps the target's alpha.
         blend: Some([SRC_ALPHA, dst, eq, 0, 0x304, ADD]),
-        depth_test: (stored[0x89b] == 0).then_some(0x203),
+        depth_test: (!emitter.depth_mask).then_some(0x203),
         depth_write: false,
     }
 }
@@ -125,8 +122,11 @@ pub fn particle_inputs(reflection: &Reflection, spawns: &[crate::draw::sim::Spaw
 pub struct GameEmitter {
     /// c9.
     pub block: std::sync::Arc<Vec<u8>>,
-    /// The emitter's stored data (render_state and the rest read at draw time).
-    pub stored: std::sync::Arc<Vec<u8>>,
+    /// The emitter's place in its effect (emitter_info), with and without its scale.
+    pub local: (glam::Mat4, glam::Mat4),
+    /// render_state.blend_type and is_depth_mask, for [`draw_state`].
+    pub blend_type: u8,
+    pub depth_mask: bool,
     pub shader_index: u32,
     /// The pool texture and sampler of each texture unit 0..2.
     pub samplers: [Option<(usize, crate::draw::gpu::SamplerKey)>; 3],
@@ -139,7 +139,7 @@ pub struct GameEmitter {
 /// and its LOD limit.
 fn sampler_key(s: &effect_library::TextureSampler) -> crate::draw::gpu::SamplerKey {
     use effect_library::enums::WrapMode;
-    // NVN wrap codes as eff_gpu reads them: 1 repeat, 6 mirrored repeat, 7 clamp. Mirror once has no wgpu mode; with
+    // NVN wrap codes as draw::gpu reads them: 1 repeat, 6 mirrored repeat, 7 clamp. Mirror once has no wgpu mode; with
     // the block's uv_scale of 2 it covers 0..2, which mirrored repeat draws the same.
     let wrap = |w: &WrapMode| match w {
         WrapMode::Repeat => 1,
@@ -158,7 +158,6 @@ fn sampler_key(s: &effect_library::TextureSampler) -> crate::draw::gpu::SamplerK
 
 impl GameEmitter {
     pub fn read(emitter: &effect_library::Emitter, textures: &[effect_library::ptcl_file::TextureDescriptor], version: u16) -> Option<Self> {
-        let stored = emitter.binary_data.as_ref().or(emitter.cached_binary.as_ref())?;
         let samplers = [&emitter.data.sampler0, &emitter.data.sampler1, &emitter.data.sampler2].map(|sampler| {
             let s = sampler.as_ref()?;
             let index = textures.iter().position(|t| t.id == s.texture_id)?;
@@ -166,7 +165,9 @@ impl GameEmitter {
         });
         Some(Self {
             block: std::sync::Arc::new(crate::draw::block::emitter_block(emitter, version)?),
-            stored: std::sync::Arc::new(stored.clone()),
+            local: emitter_local(&emitter.data.emitter_info),
+            blend_type: emitter.data.render_state.blend_type,
+            depth_mask: emitter.data.render_state.is_depth_mask,
             shader_index: u32::try_from(emitter.data.shader_references.shader_index).ok()?,
             samplers,
             custom: emitter.subsections.iter().find(|s| s.magic == "CSDP").map(|s| s.data.clone()),
@@ -203,7 +204,7 @@ pub fn mesh_inputs(reflection: &Reflection, mesh: &crate::eff::mesh_io::MeshData
 /// One emitter of a live effect, this frame, for the game's shaders.
 #[derive(Clone)]
 pub struct GameDraw {
-    /// The effect file: whose shaders draw it (eff_shader_cache).
+    /// The effect file: whose shaders draw it ([`crate::draw::shaders`]).
     pub file: std::path::PathBuf,
     pub emitter: GameEmitter,
     pub dynamic: Dynamic,
@@ -258,7 +259,7 @@ pub fn prepare(draw: &GameDraw, library: &crate::draw::gpu::ShaderLibrary) -> Op
         variation,
         cbufs,
         vertices,
-        state: draw_state(&draw.emitter.stored, prim, indices.is_some()),
+        state: draw_state(&draw.emitter, prim, indices.is_some()),
         indices,
         count,
         instances: draw.spawns.len() as u32,

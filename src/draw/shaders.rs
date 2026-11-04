@@ -1,4 +1,4 @@
-//! The game's effect shaders of an .eff, translated for wgpu (eff_gpu) and cached on disk.
+//! The game's effect shaders of an .eff, translated for wgpu (`draw::gpu`) and cached on disk.
 //!
 //! The first time an effect file is drawn, its shader variations are dumped (code, control section, reflection) and
 //! translated to WGSL in-process (`draw::mx`) into `<cache>/<file>-<hash>/wgsl`, with an index.json of what each stage

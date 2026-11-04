@@ -12,7 +12,7 @@
 //! The constant buffers are the game's own memory, byte for byte. What the shaders read, by NVN slot (`c<slot + 3>`):
 //! 0 (c3), 1 (c4), 5 (c8) the camera, 6 (c9) the emitter block (header 0x50 + the emitter's static data),
 //! 7 (c10), 8 (c11), 10 (c13), 11 (c14), 12 (c15), 13 (c16). c1 is the program's own constant data, c2 the driver's
-//! texture table. eff_game builds each of them from the .eff,
+//! texture table. `draw::inputs` builds each of them from the .eff,
 //! checked against recomp captures of the game's own.
 
 use std::collections::HashMap;

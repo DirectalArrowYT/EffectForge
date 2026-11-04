@@ -2,7 +2,7 @@
 //!
 //! Encodings follow envytools' envydis/gm107.c and Mesa's NAK sm50 backend (both MIT). Only what the game's effect
 //! shaders use is decoded -- 44 instructions, counted over every effect file in the game
-//! (eff_shader_cache::tests::dump_shader_corpus) -- and anything else is an error, so a shader the translator cannot
+//! (a dump of every shader of the game's files) -- and anything else is an error, so a shader the translator cannot
 //! handle is known before it is drawn.
 //!
 //! The code is groups of four 64-bit words: a scheduling word (ignored: it only tells the hardware how long to wait)

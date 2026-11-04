@@ -29,7 +29,7 @@ fn main() {
             let Some(game) = game else { continue };
             let emitter = &doc.emitters(set)[i];
             let names = game.samplers.map(|s| s.and_then(|(t, _)| doc.loaded.ptcl.bntx_textures.get(t)).map(|t| t.tex_name.clone()));
-            println!("{} shader {} textures {names:?} blend {} depth_mask {}", emitter.name, game.shader_index, game.stored[0x89e], game.stored[0x89b]);
+            println!("{} shader {} textures {names:?} blend {} depth_mask {}", emitter.name, game.shader_index, game.blend_type, game.depth_mask as u8);
             let word = |n: usize| f32::from_le_bytes(game.block[n * 4..n * 4 + 4].try_into().unwrap());
             println!("    uv {:?}", (184..204).map(word).collect::<Vec<_>>());
             println!("    colour0 keys {:?}", (240..256).map(word).collect::<Vec<_>>());
