@@ -309,7 +309,7 @@ fn clean(name: &str) -> String {
 
 fn working_copy(path: &Path) -> PathBuf {
     let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("effect");
-    let dir = std::env::temp_dir().join("effect_forge");
+    let dir = crate::scratch_dirs::app_storage_root().join("working");
     let _ = std::fs::create_dir_all(&dir);
     dir.join(format!("{name}.working.eff"))
 }

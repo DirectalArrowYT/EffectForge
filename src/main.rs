@@ -200,7 +200,8 @@ fn main() {
 fn check(eff: &str, png: &str, effect: &str) {
     use engine::{Doc, Pending, Target};
     let timed = |label: &str, started: std::time::Instant| println!("{label:<18} {:.1}s", started.elapsed().as_secs_f32());
-    let copy = std::env::temp_dir().join("forge_check.eff");
+    let copy = scratch_dirs::app_storage_root().join("check.eff");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
     std::fs::copy(eff, &copy).unwrap();
     let t = std::time::Instant::now();
     let doc = Doc::open(&copy).unwrap();

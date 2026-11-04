@@ -1,4 +1,4 @@
-//! What Forge is doing, and how it died: `%APPDATA%/EffectForge/forge.log`.
+//! What Forge is doing, and how it died: `forge.log` in Forge's data folder (`scratch_dirs`).
 //!
 //! The log names the file and effect on screen, so a crash line says which one caused it. Panics and native faults
 //! both land here, as do the GPU's own errors.
@@ -15,7 +15,7 @@ static CONTEXT: Mutex<String> = Mutex::new(String::new());
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
 pub fn path() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("EffectForge").join("forge.log")
+    crate::scratch_dirs::app_storage_root().join("forge.log")
 }
 
 pub fn note(line: &str) {

@@ -74,9 +74,7 @@ pub fn cache_dir(eff_path: &Path, eff: &[u8]) -> PathBuf {
         .ok()
         .and_then(|n| n.ptcl_file?.shader_info?.binary_data.map(|b| fnv(&b)))
         .unwrap_or(0);
-    dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("EffectForge")
+    crate::scratch_dirs::app_storage_root()
         .join("eff_shaders")
         .join(format!("{stem}-{hash:016x}-t{TRANSLATION}"))
 }
