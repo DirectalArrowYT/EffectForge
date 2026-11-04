@@ -6,8 +6,8 @@ use std::ops::RangeInclusive;
 use eframe::egui::{self, Color32, Sense, Vec2};
 
 use super::App;
-use crate::eff_attrs::{self, AttrKind};
-use crate::effects::EmitterDef;
+use crate::eff::fields::{self, AttrKind};
+use crate::eff::model::EmitterDef;
 
 /// `emitter_info.follow_type`, as the game's own effects use it: every trail in Smash is 1.
 pub const FOLLOW_TYPES: [(i32, &str, &str); 3] = [
@@ -442,8 +442,8 @@ impl App {
     pub(super) fn all_values(&mut self, ui: &mut egui::Ui, em: &EmitterDef) {
         ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search values"));
         let search = self.search.to_lowercase();
-        let table = eff_attrs::table();
-        for group in eff_attrs::GROUPS {
+        let table = fields::table();
+        for group in fields::GROUPS {
             let rows: Vec<_> = table.iter()
                 .filter(|a| a.group == *group && (a.id.contains(&search) || a.label.to_lowercase().contains(&search)))
                 .filter(|a| self.value(em, a.id).is_some())

@@ -1,22 +1,13 @@
 //! Effect Forge.
 
-mod eff_attrs;
-mod eff_block;
-mod eff_export;
-mod eff_game;
-mod eff_gpu;
-mod eff_mesh_io;
-mod eff_shader_cache;
-mod eff_sim;
-mod effects;
-mod mod_project;
+mod draw;
+mod eff;
 mod scratch_dirs;
 mod app;
 mod engine;
 mod log;
 mod preview;
 mod stage;
-mod texture_import;
 
 use std::path::Path;
 
@@ -44,7 +35,7 @@ fn main() {
             println!("    colour scale {} loops {:?} alpha keys {:?}", word(236), (32..38).map(word).collect::<Vec<_>>(), (272..304).map(word).collect::<Vec<_>>());
             if let Some((t, _)) = game.samplers[0] {
                 let name = &doc.loaded.ptcl.bntx_textures[t].tex_name;
-                let sampled = texture_import::decode_for_sampling(doc.loaded.texture_pool.as_deref().unwrap_or_default(), t, name).unwrap();
+                let sampled = eff::textures::decode_for_sampling(doc.loaded.texture_pool.as_deref().unwrap_or_default(), t, name).unwrap();
                 let top = &sampled.levels[0];
                 let mut sum = [0f64; 4];
                 let mut max = [0u8; 4];
@@ -65,12 +56,12 @@ fn main() {
         let index = doc.emitters(set).iter().position(|e| e.name == *layer).expect("that layer");
         let mut attrs = std::collections::BTreeMap::new();
         for (i, value) in [r, g, b].into_iter().enumerate() {
-            let value = eff_attrs::AttrValue::Float(value.parse().unwrap());
+            let value = eff::fields::AttrValue::Float(value.parse().unwrap());
             attrs.insert(format!("particle_color.color1_{}", ["r", "g", "b"][i]), value);
             attrs.insert(format!("emitter_static.color1.keys[0].{}", ["x", "y", "z"][i]), value);
         }
-        attrs.insert("particle_color.color1_type".to_string(), eff_attrs::AttrValue::Int(2));
-        attrs.insert("emitter_static.num_color1_keys".to_string(), eff_attrs::AttrValue::Int(1));
+        attrs.insert("particle_color.color1_type".to_string(), eff::fields::AttrValue::Int(2));
+        attrs.insert("emitter_static.num_color1_keys".to_string(), eff::fields::AttrValue::Int(1));
         let doc = doc.apply_values(&engine::Pending::from([((set, index), attrs)])).unwrap();
         std::fs::write(out, &doc.bytes).unwrap();
         return;
@@ -82,9 +73,9 @@ fn main() {
         let mut pending = engine::Pending::new();
         for (index, emitter) in doc.emitters(set).iter().enumerate() {
             let new = match engine::attr(emitter, id).expect("that attribute") {
-                eff_attrs::AttrValue::Float(_) => eff_attrs::AttrValue::Float(value.parse().unwrap()),
-                eff_attrs::AttrValue::Int(_) => eff_attrs::AttrValue::Int(value.parse().unwrap()),
-                eff_attrs::AttrValue::UInt(_) => eff_attrs::AttrValue::UInt(value.parse().unwrap()),
+                eff::fields::AttrValue::Float(_) => eff::fields::AttrValue::Float(value.parse().unwrap()),
+                eff::fields::AttrValue::Int(_) => eff::fields::AttrValue::Int(value.parse().unwrap()),
+                eff::fields::AttrValue::UInt(_) => eff::fields::AttrValue::UInt(value.parse().unwrap()),
             };
             pending.entry((set, index)).or_default().insert(id.to_string(), new);
         }
@@ -109,9 +100,9 @@ fn main() {
                     let row = pending.entry((set, index)).or_default();
                     for (key, v) in [("shader_references.shader_index", d.shader_index), (id, value)] {
                         let new = match engine::attr(emitter, key).unwrap() {
-                            eff_attrs::AttrValue::Float(_) => eff_attrs::AttrValue::Float(v),
-                            eff_attrs::AttrValue::Int(_) => eff_attrs::AttrValue::Int(v as i64),
-                            eff_attrs::AttrValue::UInt(_) => eff_attrs::AttrValue::UInt(v as u64),
+                            eff::fields::AttrValue::Float(_) => eff::fields::AttrValue::Float(v),
+                            eff::fields::AttrValue::Int(_) => eff::fields::AttrValue::Int(v as i64),
+                            eff::fields::AttrValue::UInt(_) => eff::fields::AttrValue::UInt(v as u64),
                         };
                         row.insert(key.to_string(), new);
                     }
@@ -165,7 +156,7 @@ fn main() {
     // Every emitter's values as JSON lines, for studying the game's own files: dump <eff> <out.jsonl>
     if let ["dump", eff, out] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).unwrap();
-        let table = eff_attrs::table();
+        let table = eff::fields::table();
         let tex = |i: Option<u32>| i.and_then(|i| doc.loaded.ptcl.bntx_textures.get(i as usize)).map(|t| t.tex_name.clone());
         let mut lines = String::new();
         for (name, set) in doc.effects() {
@@ -174,9 +165,9 @@ fn main() {
                 for (attr, value) in table.iter().zip(&emitter.attrs) {
                     if let Some(v) = value {
                         let v = match *v {
-                            eff_attrs::AttrValue::Float(f) => serde_json::json!(f),
-                            eff_attrs::AttrValue::Int(i) => serde_json::json!(i),
-                            eff_attrs::AttrValue::UInt(u) => serde_json::json!(u),
+                            eff::fields::AttrValue::Float(f) => serde_json::json!(f),
+                            eff::fields::AttrValue::Int(i) => serde_json::json!(i),
+                            eff::fields::AttrValue::UInt(u) => serde_json::json!(u),
                         };
                         values.insert(attr.id.to_string(), v);
                     }
@@ -247,7 +238,7 @@ fn check(eff: &str, png: &str, effect: &str) {
     let target = Target { entry: entry.clone(), set_idx, set_name: doc.loaded.ptcl.emitter_sets[set_idx].name.clone(), emitter_idx: 0,
         emitter_name: doc.emitters(set_idx)[0].name.clone() };
     let mut pending = Pending::new();
-    pending.entry((set_idx, 0)).or_default().insert("particle_scale.scale_x".into(), eff_attrs::AttrValue::Float(0.5));
+    pending.entry((set_idx, 0)).or_default().insert("particle_scale.scale_x".into(), eff::fields::AttrValue::Float(0.5));
     let t = std::time::Instant::now();
     let doc = doc.apply_values(&pending).unwrap();
     timed("value", t);

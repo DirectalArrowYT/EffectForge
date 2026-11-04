@@ -187,14 +187,14 @@ pub struct AuthoredEdit {
 /// Absolute new values (pristine values are re-derivable from the source eff).
 ///
 /// `attrs` is the general case and covers every field of the emitter; it is keyed by the stable
-/// ids in [`crate::eff_attrs`]. The named fields below it predate that table and are kept for
+/// ids in [`crate::eff::fields`]. The named fields below it predate that table and are kept for
 /// projects saved before it existed — the editor re-records them as `attrs` the first time it
 /// loads such a project, and both paths are applied (named first, so `attrs` wins a tie).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EmitterFieldEdits {
     /// Attribute id → new value, e.g. `"emission.rate": 12.5`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub attrs: std::collections::BTreeMap<String, crate::eff_attrs::AttrValue>,
+    pub attrs: std::collections::BTreeMap<String, crate::eff::fields::AttrValue>,
     /// Sparse byte edits to emitter child sections. The section index disambiguates repeated
     /// magic values; the magic prevents a changed source file from applying bytes to the wrong
     /// section. Storing only changed offsets keeps projects small and avoids embedding source

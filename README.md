@@ -25,7 +25,7 @@ Smash builds trails (Roy's and Ike's fire) from distance emission plus particles
 that moves (`EFFECT_FOLLOW` on a hand). Tick **Swing** under the preview to move the effect round and see it.
 
 Build: `cargo build --release`. Everything it needs is in this folder.
-`src/eff_*.rs`, `effects.rs`, `texture_import.rs`, `scratch_dirs.rs` and `vendor/effect_library` started
+`src/eff/` (the file), `src/draw/` (the preview's game shaders), `scratch_dirs.rs` and `vendor/effect_library` started
 as copies of Visionary's. They are Forge's own now: Visionary's tests, its capture reader and everything Forge never
 calls were removed on 2026-11-04 (about 10,700 lines), with every output checked byte for byte before and after.
 

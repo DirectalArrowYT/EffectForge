@@ -9,13 +9,13 @@ use anyhow::{anyhow, Result};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 
-use crate::eff_game::{Dynamic, GameDraw};
-use crate::eff_gpu::{DrawInputs, GameEffectRenderer, PreparedDraw, ShaderLibrary, TextureInput, FRAGMENT, VERTEX};
-use crate::eff_mesh_io::MeshData;
-use crate::eff_game::TextureKey;
-use crate::eff_sim::{spawns_moving, EmitterSim, Slots};
+use crate::draw::inputs::{Dynamic, GameDraw};
+use crate::draw::gpu::{DrawInputs, GameEffectRenderer, PreparedDraw, ShaderLibrary, TextureInput, FRAGMENT, VERTEX};
+use crate::eff::mesh_io::MeshData;
+use crate::draw::inputs::TextureKey;
+use crate::draw::sim::{spawns_moving, EmitterSim, Slots};
 use crate::engine::Doc;
-use crate::texture_import::{decode_for_sampling, SampledTexture};
+use crate::eff::textures::{decode_for_sampling, SampledTexture};
 
 /// Half the height of the view at the origin, in Smash units.
 pub const HALF_VIEW: f32 = 30.0;
@@ -104,7 +104,7 @@ impl Preview {
             let Some(game) = doc.loaded.game.get(set_idx).and_then(|set| set.get(index)).cloned().flatten() else { continue };
             let sim = EmitterSim::read(emitter, &self.slots);
             let seed = (set_idx as u64) << 32 ^ (index as u64) << 8;
-            let (local, local_rt) = crate::eff_game::emitter_local(&game.stored);
+            let (local, local_rt) = crate::draw::inputs::emitter_local(&game.stored);
             let speed = SWING_RADIUS * std::f32::consts::TAU / SWING_FRAMES;
             let travelled = |t: f32| t * speed;
             let mut spawned = spawns_moving(&sim, self.age, seed, self.swing.then_some(&travelled as &dyn Fn(f32) -> f32));
@@ -147,7 +147,7 @@ impl Preview {
         let eye = glam::Quat::from_rotation_y(-self.orbit.x) * glam::Quat::from_rotation_x(-self.orbit.y) * glam::Vec3::new(0.0, 0.0, distance);
         let view = glam::Mat4::look_at_rh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
         let proj = glam::Mat4::perspective_infinite_rh(FOV_Y, aspect, 2.0);
-        crate::eff_gpu::camera_block(view, proj, 2.0, 100_000.0, [1.0, 1.0, 0.01, 0.0])
+        crate::draw::gpu::camera_block(view, proj, 2.0, 100_000.0, [1.0, 1.0, 0.01, 0.0])
     }
 
     fn outline_pipeline(&mut self) -> &(wgpu::RenderPipeline, wgpu::BindGroupLayout) {
@@ -245,7 +245,7 @@ impl Preview {
 
     /// Draw this frame, and say which window texture holds it. `None` until the file's shaders are translated.
     pub fn render(&mut self, doc: &Doc, set_idx: usize, size: [u32; 2]) -> Result<Option<egui::TextureId>> {
-        let Some(dir) = crate::eff_shader_cache::ready(&doc.working()) else { return Ok(None) };
+        let Some(dir) = crate::draw::shaders::ready(&doc.working()) else { return Ok(None) };
         let device = self.render.device.clone();
         let queue = self.render.queue.clone();
         if self.renderer.as_ref().is_none_or(|(d, _)| *d != dir) {
@@ -258,7 +258,7 @@ impl Preview {
         for (_, draw) in &draws {
             for (key, pixels) in draw.textures.iter().flatten() {
                 if !self.views.contains_key(key) {
-                    let view = crate::eff_gpu::upload_sampled(&device, &queue, pixels, "effect texture");
+                    let view = crate::draw::gpu::upload_sampled(&device, &queue, pixels, "effect texture");
                     self.views.insert(key.clone(), view);
                 }
             }
@@ -267,7 +267,7 @@ impl Preview {
         let mut prepared: Vec<(usize, PreparedDraw)> = Vec::new();
         let mut problems = Vec::new();
         for (index, draw) in &draws {
-            let Some(ready) = crate::eff_game::prepare(draw, &renderer.library) else { continue };
+            let Some(ready) = crate::draw::inputs::prepare(draw, &renderer.library) else { continue };
             let textures: Vec<TextureInput> = draw.textures.iter().enumerate().filter_map(|(unit, texture)| {
                 let (key, _) = texture.as_ref()?;
                 Some(TextureInput { stage: FRAGMENT, unit: unit as u32, view: self.views.get(key)?, sampler: draw.emitter.samplers[unit]?.1 })

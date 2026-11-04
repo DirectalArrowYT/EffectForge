@@ -21,7 +21,7 @@
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureImport, TransplantOp};
+use crate::eff::edits::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureImport, TransplantOp};
 
 
 /// ONE-SLOT-scoped rebuild for export: `slot` None = the base file (only transplants with
@@ -81,7 +81,7 @@ fn sampled_texture_ids(ptcl: &effect_library::PtclFile) -> std::collections::Has
 /// stale addition must not take a working carrier down with it.
 fn apply_texture_additions(
     file: &mut effect_library::NamcoEffectFile,
-    additions: &[crate::mod_project::TextureAddition],
+    additions: &[crate::eff::edits::TextureAddition],
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     if additions.is_empty() {
@@ -117,7 +117,7 @@ fn apply_texture_additions(
             continue;
         };
         let rebuilt = if add.png_path.is_empty() {
-            crate::texture_import::duplicate_texture(pool, &names, template, &add.texture_name)
+            crate::eff::textures::duplicate_texture(pool, &names, template, &add.texture_name)
                 .with_context(|| {
                     format!(
                         "duplicating '{}' as '{}'",
@@ -132,11 +132,11 @@ fn apply_texture_additions(
                 )
             })?;
             let form = if add.raw {
-                crate::texture_import::Form::Raw
+                crate::eff::textures::Form::Raw
             } else {
-                crate::texture_import::Form::Editable
+                crate::eff::textures::Form::Editable
             };
-            let (rebuilt, _) = crate::texture_import::add_texture_from_png(
+            let (rebuilt, _) = crate::eff::textures::add_texture_from_png(
                 pool,
                 &names,
                 template,
@@ -148,7 +148,7 @@ fn apply_texture_additions(
             rebuilt
         };
         let taken: Vec<u64> = textures.descriptors.iter().map(|d| d.id).collect();
-        let id = crate::texture_import::unused_descriptor_id(&taken, &add.texture_name);
+        let id = crate::eff::textures::unused_descriptor_id(&taken, &add.texture_name);
         textures
             .descriptors
             .push(effect_library::ptcl_file::TextureDescriptor {
@@ -198,7 +198,7 @@ fn apply_texture_removals(
         let Some(pool) = textures.binary_data.as_ref() else {
             continue;
         };
-        let rebuilt = crate::texture_import::remove_texture(pool, &names, index)
+        let rebuilt = crate::eff::textures::remove_texture(pool, &names, index)
             .with_context(|| format!("removing texture '{name}'"))?;
         textures.descriptors.remove(index);
         textures.binary_data = Some(rebuilt);
@@ -257,11 +257,11 @@ fn apply_texture_imports(
             .map(|d| d.name.clone())
             .collect();
         let form = if import.raw {
-            crate::texture_import::Form::Raw
+            crate::eff::textures::Form::Raw
         } else {
-            crate::texture_import::Form::Editable
+            crate::eff::textures::Form::Editable
         };
-        let (rebuilt, report) = crate::texture_import::replace_with_png(
+        let (rebuilt, report) = crate::eff::textures::replace_with_png(
             pool, &names, index, &png, form,
         )
         .with_context(|| {
@@ -1792,7 +1792,7 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
     // above — `emission.rate` against `emission_rate`, say — the newer, more specific edit is
     // the one that survives. A project written by the current editor only carries these.
     for (id, value) in &f.attrs {
-        if !crate::eff_attrs::write(d, id, *value) {
+        if !crate::eff::fields::write(d, id, *value) {
             eprintln!(
                 "[EFF-EXPORT] warning: emitter '{}' carries an edit to unknown attribute '{id}' \
                  — skipped",
@@ -1838,7 +1838,7 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
 /// expressed against.
 fn apply_roster(
     ptcl: &mut effect_library::PtclFile,
-    roster: &crate::mod_project::EmitterRoster,
+    roster: &crate::eff::edits::EmitterRoster,
 ) -> Result<()> {
     let sets = &mut ptcl.emitter_list.emitter_sets;
     let set_named = |s: &effect_library::structs::EmitterSet| {
@@ -1955,7 +1955,7 @@ fn apply_roster(
 /// into it, and the file's own writer recomputes the counts from the vectors' lengths.
 fn apply_entry_edit(
     namco: &mut effect_library::NamcoEffectFile,
-    edit: &crate::mod_project::EntryEdit,
+    edit: &crate::eff::edits::EntryEdit,
 ) -> Result<()> {
     let entry_idx = namco
         .entry_names

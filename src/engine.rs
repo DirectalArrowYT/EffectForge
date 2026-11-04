@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::eff_attrs::{self, AttrValue};
-use crate::eff_mesh_io::{self, MeshData};
-use crate::effects::{load_effect, EmitterDef, LoadedEffect};
-use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureAddition, TransplantOp};
+use crate::eff::fields::{self, AttrValue};
+use crate::eff::mesh_io::{self, MeshData};
+use crate::eff::model::{load_effect, EmitterDef, LoadedEffect};
+use crate::eff::edits::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureAddition, TransplantOp};
 
 /// The template a new texture takes its format and size from. It keeps colour; the 512 template
 /// (ef_cmn_impactflash00) keeps only alpha.
@@ -43,7 +43,7 @@ impl Doc {
     pub fn open(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         // Another file of the same name used this working copy, and its shaders are not this file's.
-        crate::eff_shader_cache::global().lock().unwrap().forget(&working_copy(path));
+        crate::draw::shaders::global().lock().unwrap().forget(&working_copy(path));
         Self::from_bytes(path.to_path_buf(), bytes)
     }
 
@@ -53,7 +53,7 @@ impl Doc {
         let loaded = load_effect(&working)?;
         let mut primitives = HashMap::new();
         let mut primitive_ids = HashMap::new();
-        for listing in eff_mesh_io::list_primitives(&bytes)? {
+        for listing in mesh_io::list_primitives(&bytes)? {
             primitive_ids.insert(listing.id, listing.name.clone());
             for user in listing.used_by {
                 primitives.insert(user, listing.name.clone());
@@ -86,7 +86,7 @@ impl Doc {
     }
 
     pub fn mesh(&self, primitive: &str) -> Result<MeshData> {
-        eff_mesh_io::from_gltf(&eff_mesh_io::export_primitive_glb(&self.bytes, primitive)?)
+        mesh_io::from_gltf(&mesh_io::export_primitive_glb(&self.bytes, primitive)?)
     }
 
     /// The emitter's texture as drawn into the preview, with the name it has in the pool.
@@ -94,7 +94,7 @@ impl Doc {
         let index = emitter.texture_index? as usize;
         let info = self.loaded.ptcl.bntx_textures.get(index)?;
         let pool = self.loaded.texture_pool.as_ref()?;
-        crate::texture_import::decode_preview(pool, index, &info.tex_name, crate::texture_import::Form::Raw, Some(256)).ok()
+        crate::eff::textures::decode_preview(pool, index, &info.tex_name, crate::eff::textures::Form::Raw, Some(256)).ok()
     }
 
     pub fn apply_values(&self, pending: &Pending) -> Result<Self> {
@@ -120,7 +120,7 @@ impl Doc {
         let source = image::open(png).with_context(|| format!("reading {}", png.display()))?;
         let fitted = source.resize_exact(template.width, template.height, image::imageops::FilterType::Triangle).to_rgba8();
         let name = format!("forge_{}_{}", clean(&target.entry), clean(&target.emitter_name));
-        let name = crate::texture_import::unique_texture_name(
+        let name = crate::eff::textures::unique_texture_name(
             &self.loaded.ptcl.bntx_textures.iter().map(|t| t.tex_name.clone()).collect::<Vec<_>>(), &name);
         let fitted_path = working_copy(&self.path).with_extension("png");
         fitted.save(&fitted_path)?;
@@ -148,10 +148,10 @@ impl Doc {
     pub fn replace_mesh(&self, target: &Target, mesh: &MeshData) -> Result<Self> {
         let template = self.primitive_of(&target.entry, &target.emitter_name)
             .ok_or_else(|| anyhow!("{} draws no model: it is a sprite emitter", target.emitter_name))?.clone();
-        let taken: Vec<String> = eff_mesh_io::list_primitives(&self.bytes)?.into_iter().map(|p| p.name).collect();
+        let taken: Vec<String> = mesh_io::list_primitives(&self.bytes)?.into_iter().map(|p| p.name).collect();
         let stem = format!("forge_{}_{}", clean(&target.entry), clean(&target.emitter_name));
         let name = (0..).map(|i| format!("{stem}_{i}")).find(|n| !taken.contains(n)).unwrap();
-        let bytes = eff_mesh_io::add_primitive_for_emitters(&self.bytes, &template, &name, mesh,
+        let bytes = mesh_io::add_primitive_for_emitters(&self.bytes, &template, &name, mesh,
             &[(target.entry.clone(), target.emitter_name.clone())])?;
         Self::from_bytes(self.path.clone(), bytes)
     }
@@ -182,7 +182,7 @@ impl Doc {
     }
 
     fn rebuilt(&self, eff: &EffMod) -> Result<Self> {
-        let bytes = crate::eff_export::rebuild_eff_bytes_for_slot(&self.bytes, eff, None, None)?;
+        let bytes = crate::eff::writer::rebuild_eff_bytes_for_slot(&self.bytes, eff, None, None)?;
         Self::from_bytes(self.path.clone(), bytes)
     }
 }
@@ -250,7 +250,7 @@ impl Doc {
                 replace_entry: entry_names(&bytes)?.iter().any(|n| n.eq_ignore_ascii_case(entry)).then(|| entry.to_string()),
             };
             let eff = EffMod { transplants: vec![op], ..Default::default() };
-            let staged = crate::eff_export::rebuild_eff_bytes_for_slot(&bytes, &eff, working.parent(), None)?;
+            let staged = crate::eff::writer::rebuild_eff_bytes_for_slot(&bytes, &eff, working.parent(), None)?;
             std::fs::write(tuned_path, staged)?;
         } else {
             // The first one: the whole file, which every later one replaces an effect of.
@@ -299,7 +299,7 @@ pub fn merge_tuned(tuned_path: &Path, into: &[u8]) -> Result<(Vec<u8>, usize)> {
     if count == 0 {
         return Ok((into.to_vec(), 0));
     }
-    Ok((crate::eff_export::rebuild_eff_bytes_for_slot(into, &eff, tuned_path.parent(), None)?, count))
+    Ok((crate::eff::writer::rebuild_eff_bytes_for_slot(into, &eff, tuned_path.parent(), None)?, count))
 }
 
 fn entry_of(doc: &Doc, set_idx: usize) -> String {
@@ -365,7 +365,7 @@ impl Doc {
     /// What a layer's shader is compiled for besides its modes: the texture combiner, mesh or sprite, and a second
     /// texture. Two layers that agree here draw alike, so one can use the other's shader.
     fn look(&self, entry: &str, em: &EmitterDef) -> (Vec<(usize, i64)>, bool, bool) {
-        let combiner = eff_attrs::table().iter().enumerate()
+        let combiner = fields::table().iter().enumerate()
             .filter(|(_, a)| a.id.starts_with("combiner."))
             .filter_map(|(i, _)| Some((i, em.attrs.get(i).copied()??.as_i64())))
             .collect();
@@ -398,5 +398,5 @@ impl Doc {
 }
 
 pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {
-    *emitter.attrs.get(eff_attrs::index_of(id)?)?
+    *emitter.attrs.get(fields::index_of(id)?)?
 }

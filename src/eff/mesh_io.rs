@@ -696,7 +696,7 @@ pub fn add_primitive_for_emitters(
     info.binary_data = Some(pool);
     let taken: Vec<u64> = info.descriptors.iter().map(|d| d.id).collect();
     let mut descriptor = info.descriptors[index].clone();
-    descriptor.id = crate::texture_import::unused_descriptor_id(&taken, new_name);
+    descriptor.id = crate::eff::textures::unused_descriptor_id(&taken, new_name);
     apply_attribute_order(&mut descriptor, &order);
     let (old_id, new_id) = (info.descriptors[index].id, descriptor.id);
     info.descriptors.push(descriptor);

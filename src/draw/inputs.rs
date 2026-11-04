@@ -3,16 +3,16 @@
 //! Every input a captured effect draw binds, rebuilt from the .eff, the effect's placement and its clock, so the
 //! game's shaders can draw an effect the game never ran. Each was checked against the game's own, captured from the recomp:
 //!
-//! * c9, `sysEmitterStaticUniformBlock`: [`crate::eff_block::emitter_block`], byte for byte.
-//! * c8, `sysViewUniformBlock`: [`crate::eff_gpu::camera_block`], from the viewport's camera.
+//! * c9, `sysEmitterStaticUniformBlock`: [`crate::draw::block::emitter_block`], byte for byte.
+//! * c8, `sysViewUniformBlock`: [`crate::draw::gpu::camera_block`], from the viewport's camera.
 //! * c10, `sysEmitterDynamicUniformBlock`: [`dynamic_block`]: the effect's colour, the emitter's clock and particle
 //!   count, and its matrix (placement x the emitter's own transform from emitter_info).
 //! * c13 / c16, the custom shader blocks: the game's global values ([`RESERVED_PARAM`], [`CUSTOM_BLOCK2`]).
-//! * vertex inputs: [`particle_inputs`], each particle as born ([`crate::eff_sim::spawns`]), routed to the
+//! * vertex inputs: [`particle_inputs`], each particle as born ([`crate::draw::sim::spawns`]), routed to the
 //!   shader's own attribute names (its reflection).
 //! * blend / depth / cull: [`draw_state`], from render_state.
 
-use crate::eff_gpu::{DrawState, Reflection, VertexInput};
+use crate::draw::gpu::{DrawState, Reflection, VertexInput};
 
 fn f32_at(b: &[u8], at: usize) -> f32 {
     f32::from_le_bytes(b[at..at + 4].try_into().unwrap())
@@ -99,7 +99,7 @@ pub fn draw_state(stored: &[u8], prim: u32, indexed: bool) -> DrawState {
 
 /// The particles' vertex inputs, routed by the vertex stage's reflection. `emitter_rows` are the emitter matrix's
 /// rows for `sysEmtMat0..2Attr` (particles that keep the emitter's matrix from their birth).
-pub fn particle_inputs(reflection: &Reflection, spawns: &[crate::eff_sim::Spawn], emitter: glam::Mat4) -> Vec<VertexInput> {
+pub fn particle_inputs(reflection: &Reflection, spawns: &[crate::draw::sim::Spawn], emitter: glam::Mat4) -> Vec<VertexInput> {
     let mut out = Vec::new();
     let mut add = |name: &str, data: Vec<[f32; 4]>| {
         if let Some(location) = reflection.input(name) {
@@ -129,7 +129,7 @@ pub struct GameEmitter {
     pub stored: std::sync::Arc<Vec<u8>>,
     pub shader_index: u32,
     /// The pool texture and sampler of each texture unit 0..2.
-    pub samplers: [Option<(usize, crate::eff_gpu::SamplerKey)>; 3],
+    pub samplers: [Option<(usize, crate::draw::gpu::SamplerKey)>; 3],
     /// c13 (`sysCustomShaderReservedUniformBlockParam`): the emitter's CSDP data. Every shader that reads c13 belongs
     /// to an emitter with one (all captured draws); for the rest it is never read.
     pub custom: Option<Vec<u8>>,
@@ -137,7 +137,7 @@ pub struct GameEmitter {
 
 /// A sampler as the emitter sets it: its wrap modes (mirror, repeat, clamp, mirror once), linear filtering with mips,
 /// and its LOD limit.
-fn sampler_key(s: &effect_library::TextureSampler) -> crate::eff_gpu::SamplerKey {
+fn sampler_key(s: &effect_library::TextureSampler) -> crate::draw::gpu::SamplerKey {
     use effect_library::enums::WrapMode;
     // NVN wrap codes as eff_gpu reads them: 1 repeat, 6 mirrored repeat, 7 clamp. Mirror once has no wgpu mode; with
     // the block's uv_scale of 2 it covers 0..2, which mirrored repeat draws the same.
@@ -146,7 +146,7 @@ fn sampler_key(s: &effect_library::TextureSampler) -> crate::eff_gpu::SamplerKey
         WrapMode::Mirror | WrapMode::MirrorOnce => 6,
         _ => 7,
     };
-    crate::eff_gpu::SamplerKey {
+    crate::draw::gpu::SamplerKey {
         min: 5,
         mag: 1,
         wrap_s: wrap(&s.wrap_u),
@@ -165,7 +165,7 @@ impl GameEmitter {
             Some((index, sampler_key(s)))
         });
         Some(Self {
-            block: std::sync::Arc::new(crate::eff_block::emitter_block(emitter)?),
+            block: std::sync::Arc::new(crate::draw::block::emitter_block(emitter)?),
             stored: std::sync::Arc::new(stored.clone()),
             shader_index: u32::try_from(emitter.data.shader_references.shader_index).ok()?,
             samplers,
@@ -176,7 +176,7 @@ impl GameEmitter {
 
 /// A mesh emitter's own vertices, routed by the vertex stage's reflection: `sysPosAttr` (position, 1),
 /// `sysNormalAttr`, `sysTexCoordAttr` (uv0, uv1), `sysVertexColor0Attr` (white where the primitive has none).
-pub fn mesh_inputs(reflection: &Reflection, mesh: &crate::eff_mesh_io::MeshData) -> Vec<VertexInput> {
+pub fn mesh_inputs(reflection: &Reflection, mesh: &crate::eff::mesh_io::MeshData) -> Vec<VertexInput> {
     let n = mesh.positions.len();
     let mut out = Vec::new();
     let mut add = |name: &str, data: Vec<[f32; 4]>| {
@@ -207,10 +207,10 @@ pub struct GameDraw {
     pub file: std::path::PathBuf,
     pub emitter: GameEmitter,
     pub dynamic: Dynamic,
-    pub spawns: Vec<crate::eff_sim::Spawn>,
-    pub mesh: Option<std::sync::Arc<crate::eff_mesh_io::MeshData>>,
+    pub spawns: Vec<crate::draw::sim::Spawn>,
+    pub mesh: Option<std::sync::Arc<crate::eff::mesh_io::MeshData>>,
     /// Texture unit 0..2: its key (for the GPU copy) and its pixels as the shader samples them.
-    pub textures: [Option<(TextureKey, std::sync::Arc<crate::texture_import::SampledTexture>)>; 3],
+    pub textures: [Option<(TextureKey, std::sync::Arc<crate::eff::textures::SampledTexture>)>; 3],
 }
 
 /// Everything about a draw but its textures and camera, as the renderer takes it.
@@ -227,14 +227,14 @@ pub struct Prepared {
 
 /// The draw's inputs, routed through its shader's reflection. `None` when it has no particles or its shader is not in
 /// the library.
-pub fn prepare(draw: &GameDraw, library: &crate::eff_gpu::ShaderLibrary) -> Option<Prepared> {
+pub fn prepare(draw: &GameDraw, library: &crate::draw::gpu::ShaderLibrary) -> Option<Prepared> {
     if draw.spawns.is_empty() {
         return None;
     }
     let variation = draw.emitter.shader_index;
-    let reflection = &library.stage(variation, crate::eff_gpu::VERTEX)?.reflection;
-    library.stage(variation, crate::eff_gpu::FRAGMENT)?;
-    let mut vertices = crate::eff_game::particle_inputs(reflection, &draw.spawns, draw.dynamic.matrix);
+    let reflection = &library.stage(variation, crate::draw::gpu::VERTEX)?.reflection;
+    library.stage(variation, crate::draw::gpu::FRAGMENT)?;
+    let mut vertices = crate::draw::inputs::particle_inputs(reflection, &draw.spawns, draw.dynamic.matrix);
     let (prim, count, indices) = match &draw.mesh {
         Some(mesh) => {
             vertices.extend(mesh_inputs(reflection, mesh));
@@ -244,7 +244,7 @@ pub fn prepare(draw: &GameDraw, library: &crate::eff_gpu::ShaderLibrary) -> Opti
     };
     let custom = draw.emitter.custom.clone().unwrap_or_else(|| bytemuck::cast_slice(&RESERVED_PARAM).to_vec());
     let mut cbufs = Vec::new();
-    for stage in [crate::eff_gpu::VERTEX, crate::eff_gpu::FRAGMENT] {
+    for stage in [crate::draw::gpu::VERTEX, crate::draw::gpu::FRAGMENT] {
         cbufs.push((stage, 9, draw.emitter.block.to_vec()));
         cbufs.push((stage, 10, dynamic_block(&draw.dynamic)));
         cbufs.push((stage, 13, custom.clone()));

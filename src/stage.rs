@@ -10,8 +10,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
     macro_rules! println {
         ($($arg:tt)*) => { std::println!("[{:6.1}s] {}", started.elapsed().as_secs_f32(), format!($($arg)*)) };
     }
-    use crate::eff_attrs::AttrValue;
-    use crate::mod_project::{
+    use crate::eff::fields::AttrValue;
+    use crate::eff::edits::{
         AuthoredEdit, EffMod, EmitterFieldEdits, TextureAddition, TextureImport, TransplantOp,
     };
     let builds_dir = builds_dir.to_path_buf();
@@ -167,7 +167,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
             .collect(),
         ..Default::default()
     };
-    let cloned = crate::eff_export::rebuild_eff_bytes_for_slot(&original, &phase1, Some(&root), None)
+    let cloned = crate::eff::writer::rebuild_eff_bytes_for_slot(&original, &phase1, Some(&root), None)
         .expect("phase 1: the effects come in");
 
     /// A colour moved toward `hue`, keeping its brightness AND its saturation: a white
@@ -205,8 +205,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
                     continue;
                 }
                 let read = |id: &str| {
-                    crate::eff_attrs::index_of(id)
-                        .and_then(|i| (crate::eff_attrs::table()[i].get)(data))
+                    crate::eff::fields::index_of(id)
+                        .and_then(|i| (crate::eff::fields::table()[i].get)(data))
                         .map(|v| v.as_f32())
                 };
                 // Additive black is invisible, so only a normal-blend emitter can be inked.
@@ -274,8 +274,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
             for (idx, data) in flat.iter().enumerate() {
                 let mut attrs = std::collections::BTreeMap::new();
                 for (id, k) in &mul {
-                    let got = crate::eff_attrs::index_of(id)
-                        .and_then(|i| (crate::eff_attrs::table()[i].get)(data))
+                    let got = crate::eff::fields::index_of(id)
+                        .and_then(|i| (crate::eff::fields::table()[i].get)(data))
                         .unwrap_or_else(|| panic!("tune: {entry}/{}: {id} unreadable", names[idx]));
                     let scaled = match got {
                         AttrValue::Int(v) => AttrValue::Int(((v as f32) * k).round() as i64),
@@ -327,8 +327,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         });
         for (idx, data) in flat.iter().enumerate() {
             let read = |id: &str| {
-                crate::eff_attrs::index_of(id)
-                    .and_then(|i| (crate::eff_attrs::table()[i].get)(data))
+                crate::eff::fields::index_of(id)
+                    .and_then(|i| (crate::eff::fields::table()[i].get)(data))
                     .map(|v| v.as_f32())
             };
             let samples_inked = data
@@ -359,7 +359,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
     // Assembled effects: each slot clones an emitter of another entry. Resolved to set names
     // here, where phase 1's sets exist; applied by the rebuild before any authored edit, so
     // edits below address the emitters by the names their slots give them.
-    let mut rosters: Vec<crate::mod_project::EmitterRoster> = Vec::new();
+    let mut rosters: Vec<crate::eff::edits::EmitterRoster> = Vec::new();
     let mut roster_names: std::collections::HashMap<String, Vec<String>> = Default::default();
     for r in list("rosters") {
         let entry = text(&r, "entry");
@@ -376,7 +376,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
                 .unwrap_or_else(|| panic!("roster {entry}: {from} has no emitter {emitter}: {from_names:?}"));
             let name = s["name"].as_str().map(String::from).unwrap_or_else(|| emitter.clone());
             names.push(name.clone());
-            slots.push(crate::mod_project::EmitterSlot {
+            slots.push(crate::eff::edits::EmitterSlot {
                 source_idx,
                 source_name: emitter,
                 name,
@@ -390,7 +390,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         unique.dedup();
         assert_eq!(unique.len(), names.len(), "roster {entry} repeats a name: {names:?}");
         roster_names.insert(entry.to_ascii_uppercase(), names);
-        rosters.push(crate::mod_project::EmitterRoster {
+        rosters.push(crate::eff::edits::EmitterRoster {
             set_name,
             entry_name: entry,
             set_idx,
@@ -438,9 +438,9 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
     }
     // Aliases: effects authored as copies of one another point at one emitter set rather
     // than carrying their own, so the name still spawns and the file holds it once.
-    let entry_edits: Vec<crate::mod_project::EntryEdit> = list("entry_edits")
+    let entry_edits: Vec<crate::eff::edits::EntryEdit> = list("entry_edits")
         .iter()
-        .map(|e| crate::mod_project::EntryEdit {
+        .map(|e| crate::eff::edits::EntryEdit {
             entry_name: text(e, "entry"),
             emitter_set: e["emitter_set"].as_str().map(String::from),
             variants: None,
@@ -517,7 +517,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         entry_edits,
         ..Default::default()
     };
-    let mut built = crate::eff_export::rebuild_eff_bytes_for_slot(&cloned, &phase2, None, None)
+    let mut built = crate::eff::writer::rebuild_eff_bytes_for_slot(&cloned, &phase2, None, None)
         .expect("phase 2: the art applies");
 
     // Meshes last: a new primitive per source mesh, pointed at by the emitters that draw it. Builds
@@ -538,14 +538,14 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         let name = text(&m, "name");
         let glb_path = builds_dir.join(text(&m, "glb"));
         let glb = std::fs::read(&glb_path).unwrap_or_else(|e| panic!("mesh {}: {e}", glb_path.display()));
-        let mesh = crate::eff_mesh_io::from_gltf(&glb).unwrap_or_else(|e| panic!("mesh {name}: {e}"));
+        let mesh = crate::eff::mesh_io::from_gltf(&glb).unwrap_or_else(|e| panic!("mesh {name}: {e}"));
         let targets: Vec<(String, String)> = m["targets"]
             .as_array()
             .expect("mesh: targets")
             .iter()
             .map(|t| (t[0].as_str().unwrap().to_string(), t[1].as_str().unwrap().to_string()))
             .collect();
-        built = crate::eff_mesh_io::add_primitive_for_emitters(&built, &template, &name, &mesh, &targets)
+        built = crate::eff::mesh_io::add_primitive_for_emitters(&built, &template, &name, &mesh, &targets)
             .unwrap_or_else(|e| panic!("mesh {name}: {e:#}"));
         println!("mesh {name}: {} verts for {} emitters", mesh.positions.len(), targets.len());
     }
@@ -562,7 +562,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
             .collect();
         let refs: Vec<&str> = keep_names.iter().map(String::as_str).collect();
         let before = built.len();
-        built = crate::eff_export::strip_donor_eff_bytes(&built, &refs).expect("stripping to this character's effects");
+        built = crate::eff::writer::strip_donor_eff_bytes(&built, &refs).expect("stripping to this character's effects");
         println!("kept {} entries under {keep_prefixes:?}: {before} -> {} bytes", keep_names.len(), built.len());
     }
 
@@ -614,8 +614,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         });
         let data = &flat[names.iter().position(|n| n == &r.emitter).unwrap()];
         for (id, want) in &r.attrs {
-            let got = crate::eff_attrs::index_of(id)
-                .and_then(|i| (crate::eff_attrs::table()[i].get)(data))
+            let got = crate::eff::fields::index_of(id)
+                .and_then(|i| (crate::eff::fields::table()[i].get)(data))
                 .unwrap_or_else(|| panic!("{}/{}: {id} unreadable", r.entry, r.emitter));
             assert!(
                 (got.as_f32() - want.as_f32()).abs() < 1e-4,
@@ -662,8 +662,8 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
         });
         let data = &flat[edit.emitter_idx];
         for (id, want) in &edit.fields.attrs {
-            let got = crate::eff_attrs::index_of(id)
-                .and_then(|i| (crate::eff_attrs::table()[i].get)(data))
+            let got = crate::eff::fields::index_of(id)
+                .and_then(|i| (crate::eff::fields::table()[i].get)(data))
                 .unwrap_or_else(|| panic!("{}/{}: {id} unreadable", edit.entry_name, edit.emitter_name));
             assert!(
                 (got.as_f32() - want.as_f32()).abs() < 1e-4,

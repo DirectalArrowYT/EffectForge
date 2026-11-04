@@ -20,8 +20,8 @@
 //! producing particles at a rate for a duration, each living a fixed life, moving under an
 //! initial velocity and gravity, changing size and colour across that life.
 
-use crate::eff_attrs::AttrValue;
-use crate::effects::{ColorKey, EmitterDef};
+use crate::eff::fields::AttrValue;
+use crate::eff::model::{ColorKey, EmitterDef};
 
 /// Deterministic per-particle randomness.
 ///
@@ -336,7 +336,7 @@ pub struct Slots {
 
 impl Slots {
     pub fn new() -> Self {
-        let table = crate::eff_attrs::table();
+        let table = crate::eff::fields::table();
         let at = |id: &str| table.iter().position(|attr| attr.id == id);
         Self {
             rate: at("emission.rate"),

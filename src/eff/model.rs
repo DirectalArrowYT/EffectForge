@@ -27,10 +27,10 @@ pub struct ColorKey {
 #[derive(Debug, Clone)]
 pub struct EmitterDef {
     pub name: String,
-    /// Every attribute of this emitter, aligned to [`crate::eff_attrs::table`]. `None` where the
+    /// Every attribute of this emitter, aligned to [`crate::eff::fields::table`]. `None` where the
     /// emitter has no such block at all (no sampler 2, no combiner of that layout) — which the
     /// UI shows as an absent row rather than as a zero.
-    pub attrs: Vec<Option<crate::eff_attrs::AttrValue>>,
+    pub attrs: Vec<Option<crate::eff::fields::AttrValue>>,
     /// Opaque EMTR child sections. Emitter animations (`EA__`) and documented field/stripe
     /// sections are decoded by the editor, while their original bytes remain the source of
     /// truth so unknown data survives byte-for-byte.
@@ -131,7 +131,7 @@ pub struct LoadedEffect {
     pub texture_pool: Option<Vec<u8>>,
     /// Per emitter set, per emitter in `ptcl`'s flattened order: what drawing it with the game's own shaders needs
     /// (eff_game). `None` for an emitter the game path cannot draw.
-    pub game: Vec<Vec<Option<crate::eff_game::GameEmitter>>>,
+    pub game: Vec<Vec<Option<crate::draw::inputs::GameEmitter>>>,
 }
 
 pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
@@ -190,10 +190,10 @@ pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
             fn walk(
                 list: &[effect_library::Emitter],
                 textures: &[effect_library::ptcl_file::TextureDescriptor],
-                out: &mut Vec<Option<crate::eff_game::GameEmitter>>,
+                out: &mut Vec<Option<crate::draw::inputs::GameEmitter>>,
             ) {
                 for e in list {
-                    out.push(crate::eff_game::GameEmitter::read(e, textures));
+                    out.push(crate::draw::inputs::GameEmitter::read(e, textures));
                     walk(&e.children, textures, out);
                 }
             }
@@ -280,7 +280,7 @@ fn convert_ptcl(source: &effect_library::PtclFile) -> PtclFile {
         .enumerate()
         .map(|(index, texture)| {
             let described = pool
-                .and_then(|pool| crate::texture_import::describe(pool, index, &texture.name).ok());
+                .and_then(|pool| crate::eff::textures::describe(pool, index, &texture.name).ok());
             TextureInfo {
                 tex_name: texture.name.clone(),
                 width: described.as_ref().map(|d| d.width).unwrap_or(0),
@@ -347,7 +347,7 @@ fn convert_emitter(
 
     EmitterDef {
         name: data.display_name(),
-        attrs: crate::eff_attrs::read_all(data),
+        attrs: crate::eff::fields::read_all(data),
         subsections: emitter
             .subsections
             .iter()

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, TextureHandle, TextureOptions, Vec2};
 
-use crate::eff_attrs::AttrValue;
-use crate::eff_mesh_io::{self, MeshData};
-use crate::effects::EmitterDef;
+use crate::eff::fields::AttrValue;
+use crate::eff::mesh_io::{self, MeshData};
+use crate::eff::model::EmitterDef;
 use crate::engine::{attr, mirror, quarter_turn, Doc, Pending, Target, Tuned};
 use crate::preview::Preview as GamePreview;
 
@@ -618,7 +618,7 @@ impl App {
             }
             if ui.add_enabled(idle && has_mesh, egui::Button::new("Swap model…")).on_hover_text("A .glb. Sprite layers have no model to swap.").clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("glTF model", &["glb", "gltf"]).pick_file() {
-                    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| eff_mesh_io::from_gltf(&b)) {
+                    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| mesh_io::from_gltf(&b)) {
                         Ok(mesh) => self.draft_mesh = Some(mesh),
                         Err(e) => self.status = format!("That model didn't load: {e:#}"),
                     }
@@ -774,7 +774,7 @@ impl App {
         let Some(next) = self.sweep else { return };
         self.edit_kept &= self.edit_started.is_none() || self.doc.is_some();
         let Some(doc) = self.doc.clone() else { return };
-        if crate::eff_shader_cache::ready(&doc.working()).is_none() {
+        if crate::draw::shaders::ready(&doc.working()).is_none() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
             return;
         }

@@ -675,11 +675,11 @@ pub fn camera_block(view: glam::Mat4, proj: glam::Mat4, near: f32, far: f32, tai
     bytemuck::cast_slice(&f).to_vec()
 }
 
-/// A texture as the game's shaders sample it (texture_import::decode_for_sampling), on the GPU with every mip.
+/// A texture as the game's shaders sample it (textures::decode_for_sampling), on the GPU with every mip.
 pub fn upload_sampled(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    texture: &crate::texture_import::SampledTexture,
+    texture: &crate::eff::textures::SampledTexture,
     label: &str,
 ) -> wgpu::TextureView {
     let (w, h) = texture.levels[0].dimensions();
