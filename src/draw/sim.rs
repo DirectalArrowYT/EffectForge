@@ -1128,10 +1128,13 @@ pub fn spawns_moving(sim: &EmitterSim, age_frames: f32, seed: u64, travelled: Op
             let (travelled, heading) = travel(velocity, glam::Vec3::ZERO, sim.air_res, age);
             let (fallen, falling) = travel(glam::Vec3::ZERO, sim.gravity, sim.air_res, age);
             let shrink = 1.0 - sim.scale_random.x / 100.0 * hashed(seed, id ^ 0x91);
+            // The initial angle only: the game's vertex shaders add the random spread themselves,
+            // (sysRandomAttr - 0.5) * rotate_init_rand from the emitter block (c9[452..454]), so a spread baked in here is
+            // applied twice. Captured particles carry exactly rotate_init (Visionary 858dc51).
             let mut rotation = glam::Vec3::ZERO;
             for axis in 0..3 {
                 if sim.rotate_enabled[axis] {
-                    rotation[axis] = sim.rotate_init[axis] + sim.rotate_init_rand[axis] * hashed(seed, id ^ (0x61 + axis as u64));
+                    rotation[axis] = sim.rotate_init[axis];
                 }
             }
             out.push(Spawn {

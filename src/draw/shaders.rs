@@ -1,17 +1,15 @@
 //! The game's effect shaders of an .eff, translated for wgpu (eff_gpu) and cached on disk.
 //!
 //! The first time an effect file is drawn, its shader variations are dumped (code, control section, reflection) and
-//! tools/eft_shaders.py translates them (the recomp's Maxwell translator, then glslang) into
-//! `<cache>/<file>-<hash>/spv`. That takes a while, so it runs on its own thread; until it finishes, and on a machine
-//! without the tools, the preview draws nothing for that file.
-//!
-//! Tools: `EFFECT_FORGE_TOOLS` (default: this crate's tools), `python` on PATH.
+//! translated to WGSL in-process (`draw::mx`) into `<cache>/<file>-<hash>/wgsl`, with an index.json of what each stage
+//! binds. It runs on its own thread; until it finishes the preview draws nothing for that file, and a variation the
+//! translator cannot handle draws nothing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 #[derive(Clone, Debug)]
 pub enum State {
@@ -25,17 +23,11 @@ pub struct ShaderCache {
     jobs: HashMap<PathBuf, Arc<Mutex<State>>>,
 }
 
-/// Raised when tools/eft_shaders.py changes what it writes, so older translations are made again.
-const TRANSLATION: u32 = 3;
+/// Raised when the translation changes, so older translations are made again (3 was tools/eft_shaders.py's SPIR-V).
+const TRANSLATION: u32 = 4;
 
 fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
-}
-
-fn tools_dir() -> PathBuf {
-    std::env::var_os("EFFECT_FORGE_TOOLS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tools"))
 }
 
 /// Every shader variation of an .eff, as files in `out`: `v<i>_s<stage>.code` / `.ctl` (the NVN code and control
@@ -92,19 +84,59 @@ pub fn cache_dir(eff_path: &Path, eff: &[u8]) -> PathBuf {
 fn build(eff_path: &Path, dir: &Path) -> Result<()> {
     let eff = std::fs::read(eff_path).with_context(|| format!("reading {}", eff_path.display()))?;
     dump_variations(&eff, dir)?;
-    let script = tools_dir().join("eft_shaders.py");
-    if !script.exists() {
-        bail!("{} not found (set EFFECT_FORGE_TOOLS)", script.display());
-    }
-    let out = std::process::Command::new("python")
-        .arg(&script)
-        .arg(dir)
-        .output()
-        .context("running python")?;
-    if !out.status.success() || !dir.join("spv").join("index.json").exists() {
-        bail!("eft_shaders.py failed: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or(""));
-    }
+    let (ok, all) = translate_dir(dir)?;
+    eprintln!("[eff] {ok} of {all} shader stages of {} translated", eff_path.display());
     Ok(())
+}
+
+/// Translate a [`dump_variations`] folder into `<dir>/wgsl`: `v<i>_s<stage>.wgsl` and index.json (per variation and
+/// stage: ok, cbufs, in, out, samplers [{unit, binding}], and why when not ok). Returns (stages translated, stages).
+pub fn translate_dir(dir: &Path) -> Result<(usize, usize)> {
+    use crate::draw::mx::wgsl::{self, Stage};
+    let out = dir.join("wgsl");
+    std::fs::create_dir_all(&out)?;
+    let mut variations: Vec<u32> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_prefix('v')?.strip_suffix("_s4.code")?.parse().ok()
+        })
+        .collect();
+    variations.sort();
+    let stage_json = |r: &Result<wgsl::Shader>, stage: Stage| -> serde_json::Value {
+        match r {
+            Ok(s) => {
+                let base = if stage == Stage::Vertex { wgsl::VERTEX_TEXTURE_BASE } else { 0 };
+                let samplers: Vec<serde_json::Value> =
+                    s.units.iter().map(|&u| serde_json::json!({ "unit": u, "binding": base + u })).collect();
+                serde_json::json!({ "ok": true, "cbufs": s.cbufs, "in": s.inputs, "out": s.outputs, "samplers": samplers })
+            }
+            Err(e) => serde_json::json!({ "ok": false, "why": format!("{e:#}") }),
+        }
+    };
+    let read = |v: u32, s: u32| -> Result<(Vec<u8>, Vec<u8>)> {
+        let base = dir.join(format!("v{v:04}_s{s}"));
+        Ok((std::fs::read(base.with_extension("code"))?, std::fs::read(base.with_extension("ctl"))?))
+    };
+    let mut index = serde_json::Map::new();
+    let (mut ok, mut all) = (0, 0);
+    for v in variations {
+        let fs = read(v, 4).and_then(|(code, ctl)| wgsl::translate(wgsl::program(&code, &ctl)?, Stage::Fragment, 0));
+        // the vertex stage writes every varying the fragment stage reads
+        let extra = fs.as_ref().map(|s| s.inputs).unwrap_or(0);
+        let vs = read(v, 0).and_then(|(code, ctl)| wgsl::translate(wgsl::program(&code, &ctl)?, Stage::Vertex, extra));
+        for (r, s) in [(&vs, 0), (&fs, 4)] {
+            all += 1;
+            if let Ok(shader) = r {
+                std::fs::write(out.join(format!("v{v:04}_s{s}.wgsl")), &shader.wgsl)?;
+                ok += 1;
+            }
+        }
+        index.insert(v.to_string(), serde_json::json!({ "vs": stage_json(&vs, Stage::Vertex), "fs": stage_json(&fs, Stage::Fragment) }));
+    }
+    let json = serde_json::json!({ "translator": "forge-mx", "variations": index });
+    std::fs::write(out.join("index.json"), serde_json::to_vec_pretty(&json)?)?;
+    Ok((ok, all))
 }
 
 impl ShaderCache {
@@ -124,7 +156,7 @@ impl ShaderCache {
         std::thread::spawn(move || {
             let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|eff| {
                 let dir = cache_dir(&path, &eff);
-                if !dir.join("spv").join("index.json").exists() {
+                if !dir.join("wgsl").join("index.json").exists() {
                     eprintln!("[eff] translating the shaders of {} into {}", path.display(), dir.display());
                     build(&path, &dir)?;
                 }

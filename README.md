@@ -24,7 +24,8 @@ Smash builds trails (Roy's and Ike's fire) from distance emission plus particles
 **Trail** section turns both on for a layer. A trail only draws when the move's script attaches the effect to a bone
 that moves (`EFFECT_FOLLOW` on a hand). Tick **Swing** under the preview to move the effect round and see it.
 
-Build: `cargo build --release`. Everything it needs is in this folder.
+Build: `cargo build --release`. Everything it needs is in this folder: the game's effect shaders are translated to
+WGSL in-process (`src/draw/mx`), with no Python, recomp or glslang.
 `src/eff/` (the file), `src/draw/` (the preview's game shaders), `scratch_dirs.rs` and `vendor/effect_library` started
 as copies of Visionary's. They are Forge's own now: Visionary's tests, its capture reader and everything Forge never
 calls were removed on 2026-11-04 (about 10,700 lines), with every output checked byte for byte before and after.

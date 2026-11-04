@@ -1,9 +1,8 @@
 //! Drawing effects with the game's own shaders.
 //!
 //! Every emitter names one shader variation of its file (`shader_references.shader_index`): a Maxwell vertex and
-//! fragment program in the file's BNSH, which this runs. The programs
-//! are translated offline (tools/eft_shaders.py: the recomp's Maxwell translator, then glslang) into SPIR-V that wgpu
-//! reads through naga, with this binding layout:
+//! fragment program in the file's BNSH, which this runs. The programs are translated to WGSL (`draw::mx`, through
+//! draw::shaders), with this binding layout:
 //!
 //! * set 0: the vertex stage's constant buffer `c<n>` at binding n, the fragment stage's at 20 + n, each a read-only
 //!   storage buffer of `uint`; the alpha test / point size block at 19 (vertex) and 39 (fragment).
@@ -96,7 +95,7 @@ fn le_u32(b: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The translated shaders of one effect file: the shader dump (`v<i>_s<stage>.code` / `.ctl`, written by
-/// eff_shader_cache) with eft_shaders.py's `spv/` beside it.
+/// draw::shaders) with its WGSL translation, `wgsl/`, beside it.
 pub struct ShaderLibrary {
     dir: PathBuf,
     stages: HashMap<(u32, u32), StageInfo>,
@@ -105,7 +104,7 @@ pub struct ShaderLibrary {
 
 impl ShaderLibrary {
     pub fn open(dir: &Path) -> Result<Self> {
-        let index_path = dir.join("spv").join("index.json");
+        let index_path = dir.join("wgsl").join("index.json");
         let index: serde_json::Value = serde_json::from_slice(
             &std::fs::read(&index_path).with_context(|| format!("reading {}", index_path.display()))?,
         )?;
@@ -164,13 +163,9 @@ impl ShaderLibrary {
 
 
 
-    fn spirv(&self, variation: u32, stage: u32) -> Result<Vec<u32>> {
-        let path = self.dir.join("spv").join(format!("v{variation:04}_s{}.spv", if stage == VERTEX { 0 } else { 4 }));
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        if bytes.len() % 4 != 0 {
-            bail!("{} is not SPIR-V", path.display());
-        }
-        Ok(bytes.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect())
+    fn wgsl(&self, variation: u32, stage: u32) -> Result<String> {
+        let path = self.dir.join("wgsl").join(format!("v{variation:04}_s{}.wgsl", if stage == VERTEX { 0 } else { 4 }));
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
     }
 }
 
@@ -399,10 +394,10 @@ impl GameEffectRenderer {
         if let Some(m) = self.modules.get(&(variation, stage)) {
             return Ok(m.clone());
         }
-        let words = self.library.spirv(variation, stage)?;
+        let text = self.library.wgsl(variation, stage)?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("effect shader v{variation} s{stage}")),
-            source: wgpu::ShaderSource::SpirV(words.into()),
+            source: wgpu::ShaderSource::Wgsl(text.into()),
         });
         self.modules.insert((variation, stage), module.clone());
         Ok(module)

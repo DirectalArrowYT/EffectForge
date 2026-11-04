@@ -5,5 +5,6 @@
 pub mod block;
 pub mod gpu;
 pub mod inputs;
+pub mod mx;
 pub mod shaders;
 pub mod sim;
