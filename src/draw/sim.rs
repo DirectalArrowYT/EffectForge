@@ -1081,8 +1081,8 @@ fn initial(sim: &EmitterSim, burst: &Burst, slot: u32, id: u64, seed: u64) -> In
 /// ones, in the emitter's frame (a CPU emitter moves its particles on the CPU, drag and gravity included, and the
 /// shader animates size, colour and turn from the clock); life is the file's life less a whole percentage, birth is
 /// a whole frame of the emitter's clock, the scale is the particle scale less one percentage for all axes, the
-/// randoms are four uniforms in 0..1, and the initial rotation is the emitter's plus up to its random range (never
-/// less).
+/// randoms are four uniforms in 0..1, and the initial rotation is the emitter's own (the vertex shader adds the
+/// random spread).
 #[derive(Debug, Clone, Copy)]
 pub struct Spawn {
     pub position: glam::Vec3,

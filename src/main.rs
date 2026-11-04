@@ -8,6 +8,8 @@ mod engine;
 mod log;
 mod preview;
 mod stage;
+#[cfg(test)]
+mod tests;
 
 use std::path::Path;
 
@@ -69,48 +71,17 @@ fn main() {
     // A value on every layer of an effect, to try something in game: set <eff> <out> <effect> <attribute> <value>
     if let ["set", eff, out, wanted, id, value] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).unwrap();
-        let (_, set) = doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(wanted)).expect("that effect");
-        let mut pending = engine::Pending::new();
-        for (index, emitter) in doc.emitters(set).iter().enumerate() {
-            let new = match engine::attr(emitter, id).expect("that attribute") {
-                eff::fields::AttrValue::Float(_) => eff::fields::AttrValue::Float(value.parse().unwrap()),
-                eff::fields::AttrValue::Int(_) => eff::fields::AttrValue::Int(value.parse().unwrap()),
-                eff::fields::AttrValue::UInt(_) => eff::fields::AttrValue::UInt(value.parse().unwrap()),
-            };
-            pending.entry((set, index)).or_default().insert(id.to_string(), new);
-        }
-        std::fs::write(out, &doc.apply_values(&pending).unwrap().bytes).unwrap();
+        std::fs::write(out, &doc.set_on_effect(wanted, id, value).unwrap().bytes).unwrap();
         return;
     }
     // Give every layer of an effect a shader built for a mode, as the panel does: borrow <eff> <out> <effect> <attr> <value>
     if let ["borrow", eff, out, wanted, id, value] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).unwrap();
-        let (entry, set) = doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(wanted)).expect("that effect");
-        let value: f32 = value.parse().unwrap();
-        let mut pending = engine::Pending::new();
-        for (index, emitter) in doc.emitters(set).iter().enumerate() {
-            let current = |id: &str| engine::attr(emitter, id).map(|v| v.as_f32());
-            if current(id) == Some(value) {
-                println!("{}: already", emitter.name);
-                continue;
-            }
-            match doc.shader_donor(&entry, emitter, &[(id, value)], current) {
-                Some(d) => {
-                    println!("{}: shader {} from {} / {}", emitter.name, d.shader_index, d.effect, d.layer);
-                    let row = pending.entry((set, index)).or_default();
-                    for (key, v) in [("shader_references.shader_index", d.shader_index), (id, value)] {
-                        let new = match engine::attr(emitter, key).unwrap() {
-                            eff::fields::AttrValue::Float(_) => eff::fields::AttrValue::Float(v),
-                            eff::fields::AttrValue::Int(_) => eff::fields::AttrValue::Int(v as i64),
-                            eff::fields::AttrValue::UInt(_) => eff::fields::AttrValue::UInt(v as u64),
-                        };
-                        row.insert(key.to_string(), new);
-                    }
-                }
-                None => println!("{}: no donor", emitter.name),
-            }
+        let (doc, report) = doc.borrow_on_effect(wanted, id, value.parse().unwrap()).unwrap();
+        for line in report {
+            println!("{line}");
         }
-        std::fs::write(out, &doc.apply_values(&pending).unwrap().bytes).unwrap();
+        std::fs::write(out, &doc.bytes).unwrap();
         return;
     }
     // After a rebuild: put the hand-tuned effects back. merge-tuned <tuned.eff> <built.eff>, in place.

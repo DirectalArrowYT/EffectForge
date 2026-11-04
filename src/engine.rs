@@ -400,3 +400,61 @@ impl Doc {
 pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {
     *emitter.attrs.get(fields::index_of(id)?)?
 }
+
+/// `value` in the type `like` has.
+fn typed(like: AttrValue, value: f32) -> AttrValue {
+    match like {
+        AttrValue::Float(_) => AttrValue::Float(value),
+        AttrValue::Int(_) => AttrValue::Int(value as i64),
+        AttrValue::UInt(_) => AttrValue::UInt(value as u64),
+    }
+}
+
+impl Doc {
+    /// The effect of that name (any case): its entry name and set.
+    pub fn find(&self, effect: &str) -> Result<(String, usize)> {
+        self.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(effect)).ok_or_else(|| anyhow!("no effect {effect}"))
+    }
+
+    /// One value on every layer of an effect (`effect_forge set`). `value` is read as the field's own type.
+    pub fn set_on_effect(&self, effect: &str, id: &str, value: &str) -> Result<Self> {
+        let (_, set) = self.find(effect)?;
+        let mut pending = Pending::new();
+        for (index, emitter) in self.emitters(set).iter().enumerate() {
+            let new = match attr(emitter, id).ok_or_else(|| anyhow!("no field {id} on {}", emitter.name))? {
+                AttrValue::Float(_) => AttrValue::Float(value.parse()?),
+                AttrValue::Int(_) => AttrValue::Int(value.parse()?),
+                AttrValue::UInt(_) => AttrValue::UInt(value.parse()?),
+            };
+            pending.entry((set, index)).or_default().insert(id.to_string(), new);
+        }
+        self.apply_values(&pending)
+    }
+
+    /// Every layer of an effect drawn with a shader built for `id = value`, borrowed as the panel does
+    /// (`effect_forge borrow`). Also says, per layer, whose shader it took.
+    pub fn borrow_on_effect(&self, effect: &str, id: &str, value: f32) -> Result<(Self, Vec<String>)> {
+        let (entry, set) = self.find(effect)?;
+        let mut pending = Pending::new();
+        let mut report = Vec::new();
+        for (index, emitter) in self.emitters(set).iter().enumerate() {
+            let current = |id: &str| attr(emitter, id).map(|v| v.as_f32());
+            if current(id) == Some(value) {
+                report.push(format!("{}: already", emitter.name));
+                continue;
+            }
+            match self.shader_donor(&entry, emitter, &[(id, value)], current) {
+                Some(d) => {
+                    report.push(format!("{}: shader {} from {} / {}", emitter.name, d.shader_index, d.effect, d.layer));
+                    let row = pending.entry((set, index)).or_default();
+                    for (key, v) in [("shader_references.shader_index", d.shader_index), (id, value)] {
+                        let like = attr(emitter, key).ok_or_else(|| anyhow!("no field {key} on {}", emitter.name))?;
+                        row.insert(key.to_string(), typed(like, v));
+                    }
+                }
+                None => report.push(format!("{}: no donor", emitter.name)),
+            }
+        }
+        Ok((self.apply_values(&pending)?, report))
+    }
+}

@@ -45,6 +45,11 @@ and fades (`src/app/recipes.json`).
 
 ## Logs and checks
 
+- `cargo test --release`: the set and borrow edits must give the same bytes as the Forge of before the 2026-11-04
+  cleanup, every other value must survive a rebuild, the particles spawned for all of ef_common are pinned by a hash, every
+  shader of ef_pit must translate, and recipes may only name real fields. They read the extracted arc
+  (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`).
+
 - Crashes, GPU errors and the effect on screen go to `%APPDATA%/EffectForge/forge.log`.
 - `effect_forge sweep <file.eff>` draws every effect early, midway and late, makes one edit, and logs anything that fails.
 - `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes.
