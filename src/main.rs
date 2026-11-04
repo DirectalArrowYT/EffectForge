@@ -147,7 +147,7 @@ fn main() {
                     "effect": name, "emitter": emitter.name, "depth": emitter.depth,
                     "tex0": tex(emitter.texture_index), "tex1": tex(emitter.texture_index1),
                     "primitive": doc.primitive_of(&name, &emitter.name),
-                    "sections": emitter.subsections.iter().map(|s| s.magic.clone()).collect::<Vec<_>>(),
+                    "sections": emitter.sections,
                     "v": values,
                 });
                 lines.push_str(&row.to_string());
