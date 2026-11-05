@@ -28,6 +28,8 @@ enum Job {
     NewEffect(String, &'static Piece),
     /// A piece of the kit added to an effect as more layers.
     AddLayer(String, &'static Piece),
+    /// Layer n of an effect (and the layers under it) copied, the copy placed after them.
+    DuplicateLayer(String, usize, usize),
     /// Layer n of an effect (and the layers under it) taken out.
     RemoveLayer(String, usize, usize),
     /// Effect `.0` called `.1`.
@@ -54,6 +56,8 @@ struct ImportPick {
 
 enum Done {
     Doc(Result<Doc>, String),
+    /// A layer copied: the file, and the copy's layer number to show.
+    Layer(Result<Doc>, usize),
     Saved(Result<PathBuf>),
     Exported(Result<usize>, PathBuf),
     Tuned(Result<Tuned>, String),
@@ -247,6 +251,10 @@ impl App {
                 Job::NewEffect(name, piece) => Done::Doc(doc.expect("doc").new_effect(&name, piece),
                     format!("Made {name} from {}. Keep my tuning to have rebuilds keep it", piece.name)),
                 Job::AddLayer(entry, piece) => Done::Doc(doc.expect("doc").add_layer(&entry, piece), format!("Added {}", piece.name)),
+                Job::DuplicateLayer(entry, set, layer) => match doc.expect("doc").duplicate_layer(&entry, set, layer) {
+                    Ok((doc, at)) => Done::Layer(Ok(doc), at),
+                    Err(e) => Done::Layer(Err(e), layer),
+                },
                 Job::RemoveLayer(entry, set, layer) => Done::Doc(doc.expect("doc").remove_layer(&entry, set, layer), "Layer removed".into()),
                 Job::Stage(entry, set, tuned) => Done::Tuned(doc.expect("doc").stage(&entry, set, &tuned), format!("{entry} kept in {}", tuned.display())),
                 Job::Merge(tuned, into) => Done::Tuned(
@@ -271,6 +279,15 @@ impl App {
 
     fn poll(&mut self) {
         while let Ok(done) = self.done.try_recv() {
+            // a copied layer lands like any other change, then shows the copy
+            let (done, show_layer) = match done {
+                Done::Layer(Ok(doc), at) => (Done::Doc(Ok(doc), "Layer duplicated".into()), Some(at)),
+                Done::Layer(Err(e), _) => (Done::Doc(Err(e), "Duplicating the layer".into()), None),
+                done => (done, None),
+            };
+            if let Some(at) = show_layer {
+                self.emitter = at;
+            }
             match done {
                 Done::Doc(Ok(doc), note) => {
                     if let Some(name) = self.select.take() {
@@ -312,6 +329,7 @@ impl App {
                     }
                     self.status = note;
                 }
+                Done::Layer(..) => unreachable!("turned into Done::Doc above"),
                 Done::Doc(Err(e), note) => {
                     self.busy = None;
                     self.renaming = None;
@@ -1174,24 +1192,42 @@ impl App {
                 })
                 .response
                 .on_hover_text("One of the game's own layers, copied in with its texture, model and shader.");
+                if ui.button("Duplicate layer").on_hover_text("Copies the selected layer and any under it.").clicked() {
+                    self.duplicate_layer(entry, set_idx, self.emitter);
+                }
                 let last = emitters.len() <= 1;
                 if ui.add_enabled(!last, egui::Button::new("Remove layer"))
                     .on_hover_text("Takes out the selected layer and any under it.")
                     .on_disabled_hover_text("An effect needs at least one layer.")
                     .clicked()
                 {
-                    let layer = self.emitter;
-                    self.emitter = 0;
-                    self.preview = None;
-                    self.run(Job::RemoveLayer(entry.to_string(), set_idx, layer), "Removing the layer");
+                    self.remove_layer(entry, set_idx, self.emitter);
                 }
             });
         });
+        let ready = idle && self.pending.is_empty() && self.applying.is_empty();
         let mut picked = None;
         for (i, em) in emitters.iter().enumerate() {
-            if ui.selectable_label(self.emitter == i, &em.name).clicked() {
+            let response = ui.selectable_label(self.emitter == i, &em.name);
+            if response.clicked() {
                 picked = Some(i);
             }
+            response.context_menu(|ui| {
+                ui.add_enabled_ui(ready, |ui| {
+                    if ui.button("Duplicate layer").on_hover_text("Copies it and any layers under it.").clicked() {
+                        self.duplicate_layer(entry, set_idx, i);
+                        ui.close();
+                    }
+                    if ui.add_enabled(emitters.len() > 1, egui::Button::new("Remove layer"))
+                        .on_hover_text("Takes it out with any layers under it.")
+                        .on_disabled_hover_text("An effect needs at least one layer.")
+                        .clicked()
+                    {
+                        self.remove_layer(entry, set_idx, i);
+                        ui.close();
+                    }
+                });
+            });
         }
         if let Some(i) = picked {
             self.emitter = i;
@@ -1225,6 +1261,17 @@ impl App {
             }
         });
         egui::CollapsingHeader::new("All values").show(ui, |ui| self.all_values(ui, em));
+    }
+
+    fn duplicate_layer(&mut self, entry: &str, set_idx: usize, layer: usize) {
+        self.preview = None;
+        self.run(Job::DuplicateLayer(entry.to_string(), set_idx, layer), "Duplicating the layer");
+    }
+
+    fn remove_layer(&mut self, entry: &str, set_idx: usize, layer: usize) {
+        self.emitter = 0;
+        self.preview = None;
+        self.run(Job::RemoveLayer(entry.to_string(), set_idx, layer), "Removing the layer");
     }
 
     /// Keeping this effect's tuning over rebuilds of the generated file.

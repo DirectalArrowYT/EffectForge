@@ -565,6 +565,40 @@ fn layers_add_and_remove() {
     }
 }
 
+/// A duplicated layer comes right after the layer and the layers under it, with them, renamed, and with their values;
+/// the effect's own layers keep theirs.
+#[test]
+fn layer_duplicates() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&pit);
+    // a layer with one under it, if the file has one, so the copy takes both
+    let (entry, set, layer) = doc.effects().into_iter()
+        .find_map(|(n, set)| {
+            let ems = doc.emitters(set);
+            (0..ems.len().saturating_sub(1)).find(|&i| ems[i + 1].depth > ems[i].depth).map(|i| (n.clone(), set, i))
+        })
+        .or_else(|| doc.effects().into_iter().find(|(_, s)| doc.emitters(*s).len() > 1).map(|(n, s)| (n, s, 0)))
+        .expect("an effect with layers");
+    let before = doc.emitters(set).to_vec();
+    let end = (layer + 1..before.len()).find(|&i| before[i].depth <= before[layer].depth).unwrap_or(before.len());
+    let (made, at) = doc.duplicate_layer(&entry, set, layer).unwrap();
+    assert_eq!(at, end);
+    let after = made.emitters(set);
+    assert_eq!(after.len(), before.len() + end - layer);
+    for i in 0..before.len() {
+        let j = if i < end { i } else { i + end - layer };
+        assert_eq!(after[j].name, before[i].name);
+        assert_eq!(after[j].attrs, before[i].attrs, "{}", before[i].name);
+    }
+    for i in layer..end {
+        let copy = &after[end + i - layer];
+        assert_eq!(copy.name, format!("{}_2", before[i].name));
+        assert_eq!(copy.depth, before[i].depth);
+        assert_eq!(copy.attrs, before[i].attrs, "{}", copy.name);
+    }
+}
+
 /// A renamed effect keeps its layers and its values, and an export leaves the effects of a skipped folder empty and
 /// every other effect as it was.
 #[test]

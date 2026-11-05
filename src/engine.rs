@@ -207,13 +207,46 @@ impl Doc {
         self.rebuilt_from(&EffMod { transplants: vec![op], ..Default::default() }, Some(&root))
     }
 
+    /// The layers under layer `emitter_idx`, not counting it: the ones after it that sit deeper.
+    fn layer_end(emitters: &[EmitterDef], emitter_idx: usize) -> usize {
+        let depth = emitters[emitter_idx].depth;
+        emitters[emitter_idx + 1..].iter().position(|e| e.depth <= depth).map_or(emitters.len(), |n| emitter_idx + 1 + n)
+    }
+
+    /// The effect with a copy of layer `emitter_idx` (and the layers under it) placed just after them. The copies are
+    /// named `<name>_2` (then `_3`, ...), since values are kept by layer name. Returns the file and where the
+    /// copy is.
+    pub fn duplicate_layer(&self, entry: &str, set_idx: usize, emitter_idx: usize) -> Result<(Self, usize)> {
+        let emitters = self.emitters(set_idx);
+        emitters.get(emitter_idx).ok_or_else(|| anyhow!("no layer {emitter_idx}"))?;
+        let end = Self::layer_end(emitters, emitter_idx);
+        let slot = |i: usize, name: String| {
+            let e = &emitters[i];
+            EmitterSlot { source_idx: i, source_name: e.name.clone(), name, depth: e.depth, source_set: String::new() }
+        };
+        let mut taken: Vec<String> = emitters.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+        let mut slots: Vec<EmitterSlot> = (0..end).map(|i| slot(i, emitters[i].name.clone())).collect();
+        for i in emitter_idx..end {
+            let name = copy_name(&emitters[i].name, &taken);
+            taken.push(name.to_ascii_lowercase());
+            slots.push(slot(i, name));
+        }
+        slots.extend((end..emitters.len()).map(|i| slot(i, emitters[i].name.clone())));
+        let roster = EmitterRoster {
+            set_name: self.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+            entry_name: entry.to_string(),
+            set_idx,
+            slots,
+        };
+        Ok((self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })?, end))
+    }
+
     /// The effect without layer `emitter_idx` (and the layers under it).
     pub fn remove_layer(&self, entry: &str, set_idx: usize, emitter_idx: usize) -> Result<Self> {
         let emitters = self.emitters(set_idx);
-        let gone = emitters.get(emitter_idx).ok_or_else(|| anyhow!("no layer {emitter_idx}"))?;
+        emitters.get(emitter_idx).ok_or_else(|| anyhow!("no layer {emitter_idx}"))?;
         // its children follow it, deeper than it
-        let end = emitters[emitter_idx + 1..].iter().position(|e| e.depth <= gone.depth)
-            .map_or(emitters.len(), |n| emitter_idx + 1 + n);
+        let end = Self::layer_end(emitters, emitter_idx);
         if end - emitter_idx == emitters.len() {
             return Err(anyhow!("that is every layer the effect has; an effect needs one"));
         }
@@ -448,6 +481,18 @@ impl Doc {
         tuned.save()?;
         Ok(tuned)
     }
+}
+
+/// `name` with `_2` (or `_3`, ...) on the end, as an added layer is named, not one of `taken` (lowercase), and short enough for the file's
+/// 63-byte layer names.
+fn copy_name(name: &str, taken: &[String]) -> String {
+    (2..).map(|n| {
+        let tail = format!("_{n}");
+        let base: String = name.chars().take_while(|c| c.is_ascii()).take(63 - tail.len()).collect();
+        format!("{base}{tail}")
+    })
+    .find(|n| !taken.contains(&n.to_ascii_lowercase()))
+    .expect("a free name")
 }
 
 /// The names of the effects in an .eff on disk.

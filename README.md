@@ -22,7 +22,8 @@ kept as tuned.
 Type a name under the search box and pick **New effect**: the menu is a starter kit of Smash's own layers (sparks,
 flashes, rings, fire, smoke, trails, beams, slashes, bits; `src/kit.json`). The layer is copied in with its texture,
 model and shader, so it draws in game exactly as it does in Smash. **Add layer** beside the layer list adds more from
-the kit (a name the effect already has gets `_2`), **Remove layer** takes the selected one out with any under it. Then
+the kit (a name the effect already has gets `_2`), **Duplicate layer** copies the selected one (and any under it) in just after it, named with `_2` (or the
+next free number), **Remove layer** takes the selected one out with any under it; right-click a layer for both. Then
 shape each layer with the panel and **Save to mod**.
 
 The kit is read from the game's own effect files: the first time, the menu asks for the dumped game folder (later: **File > Game files folder…**) that holds

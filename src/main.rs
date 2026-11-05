@@ -112,7 +112,7 @@ fn main() {
     }
     // Making an effect from the starter kit, as the window does; each writes <out>:
     //   new-effect <eff> <out> <new name> <piece>    add-layer <eff> <out> <effect> <piece>
-    //   remove-layer <eff> <out> <effect> <layer number>    kit (lists the pieces)
+    //   remove-layer <eff> <out> <effect> <layer number>    duplicate-layer <eff> <out> <effect> <layer number>    kit (lists the pieces)
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["kit"] => {
             for piece in engine::kit() {
@@ -120,13 +120,17 @@ fn main() {
             }
             return;
         }
-        [cmd @ ("new-effect" | "add-layer" | "remove-layer"), eff, out, name, what] => {
+        [cmd @ ("new-effect" | "add-layer" | "remove-layer" | "duplicate-layer"), eff, out, name, what] => {
             let doc = engine::Doc::open(Path::new(eff)).unwrap();
             let piece = || engine::kit().iter().find(|p| p.name.eq_ignore_ascii_case(what)).expect("a piece of the kit (see: kit)");
             let effect = || doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).expect("that effect");
             let made = match *cmd {
                 "new-effect" => doc.new_effect(name, piece()),
                 "add-layer" => doc.add_layer(&effect().0, piece()),
+                "duplicate-layer" => {
+                    let (entry, set) = effect();
+                    doc.duplicate_layer(&entry, set, what.parse().expect("a layer number")).map(|(made, _)| made)
+                }
                 _ => {
                     let (entry, set) = effect();
                     doc.remove_layer(&entry, set, what.parse().expect("a layer number"))
