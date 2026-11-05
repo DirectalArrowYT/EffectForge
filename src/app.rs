@@ -160,6 +160,7 @@ pub struct Shot {
     pub frame: f32,
     pub layer: Option<usize>,
     pub outline: Option<usize>,
+    pub ghost: Option<usize>,
     /// Camera turn and tilt, radians.
     pub orbit: [f32; 2],
     /// Half the view's height, in Smash units.
@@ -883,7 +884,17 @@ impl App {
                     {
                         game.outline = outlined.then_some(emitter);
                     }
-                    ui.label("All layers, the game's shaders.");
+                    let mut ghosted = game.ghost.is_some();
+                    if ui.checkbox(&mut ghosted, "Ghost").on_hover_text("The selected layer's model as a flat see-through shape, to see where it sits").changed()
+                        || (game.ghost.is_some() && self.shot.is_none())
+                    {
+                        game.ghost = ghosted.then_some(emitter);
+                    }
+                    if game.ghost.is_some() {
+                        ui.spacing_mut().slider_width = 60.0;
+                        ui.add(egui::Slider::new(&mut game.ghost_opacity, 0.05..=1.0).show_value(false))
+                            .on_hover_text(format!("Ghost opacity {:.0}%", game.ghost_opacity * 100.0));
+                    }
                 });
                 true
             }
@@ -1388,6 +1399,7 @@ impl App {
             game.playing = false;
             game.solo = shot.layer;
             game.outline = shot.outline;
+            game.ghost = shot.ghost;
             game.orbit = Vec2::new(shot.orbit[0], shot.orbit[1]);
             game.half_view = shot.view;
             game.swing = shot.swing;

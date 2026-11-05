@@ -35,6 +35,8 @@ impl Theme {
 
     fn visuals(self) -> Visuals {
         let mut v = Visuals::dark();
+        // the text of picked items and menus: white reads on any highlight
+        v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
         if self == Theme::Dark {
             return v;
         }
@@ -55,7 +57,6 @@ impl Theme {
         v.code_bg_color = stripe;
         v.hyperlink_color = orange;
         v.selection.bg_fill = orange_dim;
-        v.selection.stroke = Stroke::new(1.0, orange);
         v.slider_trailing_fill = true;
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = panel;

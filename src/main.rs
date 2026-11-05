@@ -263,13 +263,14 @@ fn main() {
         return;
     }
     let sweep = args.first().is_some_and(|a| a == "sweep");
-    // shot <eff> <effect> <out.png> <frame> [layer number, o<number> to outline it, or - for all] [camera turn] [camera tilt] [half view] [swing]
+    // shot <eff> <effect> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or - for all] [camera turn] [camera tilt] [half view] [swing]
     let shot = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["shot", _, _, out, frame, rest @ ..] => Some(app::Shot {
             out: out.into(),
             frame: frame.parse().expect("a frame number"),
-            layer: rest.first().filter(|l| **l != "-" && !l.starts_with('o')).map(|l| l.parse().expect("a layer number")),
+            layer: rest.first().filter(|l| **l != "-" && !l.starts_with(['o', 'g'])).map(|l| l.parse().expect("a layer number")),
             outline: rest.first().and_then(|l| l.strip_prefix('o')).map(|l| l.parse().expect("a layer number")),
+            ghost: rest.first().and_then(|l| l.strip_prefix('g')).map(|l| l.parse().expect("a layer number")),
             orbit: [rest.get(1), rest.get(2)].map(|v| v.map_or(0.0, |v| v.parse().expect("an angle"))),
             view: rest.get(3).map_or(preview::HALF_VIEW, |v| v.parse().expect("a view size")),
             swing: rest.get(4).is_some_and(|v| *v == "swing"),

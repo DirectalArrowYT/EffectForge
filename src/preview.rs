@@ -65,7 +65,12 @@ pub struct Preview {
     pub outline: Option<usize>,
     /// Move the emitter round a circle, as a hand would: trails only show on an emitter that moves.
     pub swing: bool,
+    /// Draw this layer's model over the effect as a flat see-through shape.
+    pub ghost: Option<usize>,
+    /// How solid the ghost is, 0 to 1.
+    pub ghost_opacity: f32,
     outline_pipeline: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
+    ghost_pipeline: Option<wgpu::RenderPipeline>,
 }
 
 impl Preview {
@@ -76,6 +81,7 @@ impl Preview {
             render, target: None, renderer: None, meshes: HashMap::new(), pixels: HashMap::new(),
             views: HashMap::new(), age: 0.0, playing: true, orbit: egui::Vec2::ZERO, solo: None, half_view: HALF_VIEW,
             outline: None, swing: false, outline_pipeline: None, backdrop: [0.013, 0.012, 0.024],
+            ghost: None, ghost_opacity: 0.35, ghost_pipeline: None,
         }
     }
 
@@ -197,6 +203,50 @@ impl Preview {
         self.outline_pipeline.as_ref().unwrap()
     }
 
+    fn ghost_pipeline(&mut self) {
+        if self.ghost_pipeline.is_some() {
+            return;
+        }
+        let layout = self.outline_pipeline().1.clone();
+        let device = &self.render.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ghost"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("ghost.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ghost"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        // mixed in by the blend constant, so one pipeline serves every opacity
+        let mix = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Constant,
+            dst_factor: wgpu::BlendFactor::OneMinusConstant,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ghost"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: DRAW_FORMAT,
+                    blend: Some(wgpu::BlendState { color: mix, alpha: mix }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.ghost_pipeline = Some(pipeline);
+    }
+
     fn target(&mut self, size: [u32; 2]) -> &Target {
         if self.target.as_ref().is_none_or(|t| t.size != size) {
             let layout = self.outline_pipeline().1.clone();
@@ -265,6 +315,7 @@ impl Preview {
         }
         let renderer = self.renderer.as_mut().ok_or_else(|| anyhow!("no renderer"))?;
         let mut prepared: Vec<(usize, PreparedDraw)> = Vec::new();
+        let mut ghost = None;
         let mut problems = Vec::new();
         for (index, draw) in &draws {
             let Some(ready) = crate::draw::inputs::prepare(draw, &renderer.library) else { continue };
@@ -279,6 +330,12 @@ impl Preview {
                 variation: ready.variation, cbufs, vertices: ready.vertices, indices: ready.indices, state: ready.state,
                 count: ready.count, instances: ready.instances, textures,
             };
+            if self.ghost == Some(*index) {
+                match renderer.prepare_flat(&device, &inputs, format) {
+                    Ok(draw) => ghost = Some(draw),
+                    Err(e) => problems.push(format!("{e:#}")),
+                }
+            }
             match renderer.prepare(&device, &inputs, format, None) {
                 Ok(draw) => prepared.push((*index, draw)),
                 Err(e) => problems.push(format!("{e:#}")),
@@ -289,6 +346,9 @@ impl Preview {
         }
         let outline = self.outline.filter(|layer| prepared.iter().any(|(index, _)| index == layer));
         self.outline_pipeline();
+        self.ghost_pipeline();
+        let ghost_pipeline = self.ghost_pipeline.clone();
+        let opacity = self.ghost_opacity.clamp(0.0, 1.0) as f64;
         let [r, g, b] = self.backdrop;
         let target = self.target(size);
         let id = target.id;
@@ -313,6 +373,41 @@ impl Preview {
             for (_, draw) in &prepared {
                 draw.encode(&mut pass);
             }
+        }
+        if let Some(ghost) = &ghost {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ghost mask"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.mask,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                ghost.encode(&mut pass);
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ghost"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(ghost_pipeline.as_ref().unwrap());
+            pass.set_blend_constant(wgpu::Color { r: opacity, g: opacity, b: opacity, a: opacity });
+            pass.set_bind_group(0, &target.mask_bind, &[]);
+            pass.draw(0..3, 0..1);
         }
         if let Some(layer) = outline {
             {

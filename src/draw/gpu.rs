@@ -270,7 +270,12 @@ struct PipelineKey {
     state: DrawState,
     color: wgpu::TextureFormat,
     depth: Option<wgpu::TextureFormat>,
+    /// Every covered pixel plain white, whatever the game's fragment stage would do: the layer's shape alone.
+    flat: bool,
 }
+
+/// The fragment stage of a flat draw.
+const FLAT_FRAGMENT: &str = "@fragment\nfn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 1.0, 1.0, 1.0); }\n";
 
 struct Layout {
     groups: [wgpu::BindGroupLayout; 2],
@@ -368,7 +373,11 @@ impl GameEffectRenderer {
         }
         let variation = key.variation;
         let vs = self.module(device, variation, Stage::Vertex)?;
-        let fs = self.module(device, variation, Stage::Fragment)?;
+        let fs = if key.flat {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("flat"), source: wgpu::ShaderSource::Wgsl(FLAT_FRAGMENT.into()) })
+        } else {
+            self.module(device, variation, Stage::Fragment)?
+        };
         let attributes: Vec<[wgpu::VertexAttribute; 1]> = key
             .slots
             .iter()
@@ -396,7 +405,7 @@ impl GameEffectRenderer {
                 entry_point: Some("main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: key.color,
-                    blend: state.blend.map(|b| wgpu::BlendState {
+                    blend: state.blend.filter(|_| !key.flat).map(|b| wgpu::BlendState {
                         color: blend_component(b[0], b[1], b[2]),
                         alpha: blend_component(b[3], b[4], b[5]),
                     }),
@@ -436,6 +445,22 @@ impl GameEffectRenderer {
         color: wgpu::TextureFormat,
         depth: Option<wgpu::TextureFormat>,
     ) -> Result<PreparedDraw> {
+        self.prepare_as(device, inputs, color, depth, false)
+    }
+
+    /// The draw's shape alone, every pixel it covers white (see [`PipelineKey::flat`]).
+    pub fn prepare_flat(&mut self, device: &wgpu::Device, inputs: &DrawInputs<'_>, color: wgpu::TextureFormat) -> Result<PreparedDraw> {
+        self.prepare_as(device, inputs, color, None, true)
+    }
+
+    fn prepare_as(
+        &mut self,
+        device: &wgpu::Device,
+        inputs: &DrawInputs<'_>,
+        color: wgpu::TextureFormat,
+        depth: Option<wgpu::TextureFormat>,
+        flat: bool,
+    ) -> Result<PreparedDraw> {
         let variation = inputs.variation;
         let library = self.library.clone();
         let programs = programs(&library, variation)?;
@@ -457,7 +482,7 @@ impl GameEffectRenderer {
                 usage: wgpu::BufferUsages::VERTEX,
             }));
         }
-        let pipeline = self.pipeline(device, PipelineKey { variation, slots, state: inputs.state, color, depth })?;
+        let pipeline = self.pipeline(device, PipelineKey { variation, slots, state: inputs.state, color, depth, flat })?;
 
         // Set 0: each stage's constant buffers, then its alpha test block.
         let mut buffers = Vec::new();

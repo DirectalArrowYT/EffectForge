@@ -59,6 +59,12 @@ Smash builds trails (Roy's and Ike's fire) from distance emission plus particles
 **Trail** section turns both on for a layer. A trail only draws when the move's script attaches the effect to a bone
 that moves (`EFFECT_FOLLOW` on a hand). Tick **Swing** under the preview to move the effect round and see it.
 
+## Seeing a layer's model
+
+Under the preview, **Outline** draws a yellow line round the selected layer. **Ghost** draws the selected layer's
+model over everything as a flat see-through shape, whatever its texture, so you can see where the mesh actually
+sits; the slider beside it sets how solid it is. Both are preview only and never reach the file.
+
 Build: `cargo build --release`. Everything it needs is in this folder: the game's effect shaders are translated to
 WGSL in-process (`src/draw/mx`), with no Python, recomp or glslang.
 `src/eff/` (the file), `src/draw/` (the preview's game shaders), `scratch_dirs.rs` and `vendor/effect_library` started
@@ -89,7 +95,7 @@ and fades (`src/app/recipes.json`).
 
 - Crashes, GPU errors and the effect on screen go to `%APPDATA%/EffectForge/forge.log`.
 - `effect_forge sweep <file.eff>` draws every effect early, midway and late, makes one edit, and logs anything that fails.
-- `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes.
+- `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes.
 - `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field.
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> <field> <value>` borrows a shader for every layer of an effect, as the panel does, and prints whose.
