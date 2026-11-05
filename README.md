@@ -28,7 +28,9 @@ Build: `cargo build --release`. Everything it needs is in this folder: the game'
 WGSL in-process (`src/draw/mx`), with no Python, recomp or glslang.
 `src/eff/` (the file), `src/draw/` (the preview's game shaders), `scratch_dirs.rs` and `vendor/effect_library` started
 as copies of Visionary's. They are Forge's own now: Visionary's tests, its capture reader and everything Forge never
-calls were removed on 2026-11-04 (about 10,700 lines), with every output checked byte for byte before and after.
+calls were removed on 2026-11-04 (about 10,700 lines), and then the engine (`src/eff`, `src/draw`, the shader
+translator in `src/draw/mx` included) was rewritten module by module, each output checked byte for byte against the
+code it replaced (`cargo test --release` pins them).
 
 ## Shaders decide some looks
 

@@ -1,7 +1,10 @@
-//! The translator for the game's effect shaders: Maxwell machine code in, WGSL out. Brought over from Visionary's
-//! src/mx on 2026-11-04 (its tests, over all 17,885 effect shader stages in the game, stay there).
+//! The translator for the game's effect shaders: Maxwell machine code in, WGSL out.
+//!
+//! `decode` reads the machine words into `isa` instructions, `flow` works out the jumps, `emit` writes each
+//! instruction as WGSL statements and `wgsl` puts them in a module with its bindings and entry point.
 
-#[allow(dead_code)]
 pub mod decode;
-#[allow(dead_code)]
+mod emit;
+mod flow;
+pub mod isa;
 pub mod wgsl;
