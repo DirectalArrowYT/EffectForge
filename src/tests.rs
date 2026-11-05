@@ -322,3 +322,122 @@ fn texture_edits_give_the_same_pool() {
     assert_eq!(fnv(&text), TEXTURE_EDITS);
 }
 const TEXTURE_EDITS: u64 = 0x1fb77a886849b645;
+
+/// The primitives of ef_pit and ef_common: the listing, each one's glb and the mesh read back from it, and new
+/// primitives made from them, pinned by a hash. `FORGE_TEST_GLB` (a folder) also reads every glb in it, printed only.
+#[test]
+fn meshes_are_unchanged() {
+    use crate::eff::mesh_io::*;
+    let files: Vec<PathBuf> = [pit(), common()].into_iter().flatten().collect();
+    if files.is_empty() {
+        return;
+    }
+    let mut text = Vec::new();
+    let mut count = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).unwrap();
+        let listing = list_primitives(&bytes).unwrap();
+        let mut meshes = Vec::new();
+        for p in &listing {
+            text.extend(format!("{} {:#x} {} {} {:?}\n", p.name, p.id, p.vertices, p.triangles, p.used_by).bytes());
+            let glb = export_primitive_glb(&bytes, &p.name).unwrap();
+            text.extend(format!("{:#x}\n", fnv(&glb)).bytes());
+            let mesh = from_gltf(&glb).unwrap();
+            text.extend(format!("{mesh:?}\n").bytes());
+            meshes.push(mesh);
+            count += 1;
+        }
+        // Each used primitive replaced, for its first user, by the next primitive's mesh; then one mesh with every
+        // attribute on, and one with none.
+        let used: Vec<_> = listing.iter().enumerate().filter(|(_, p)| !p.used_by.is_empty()).take(6).collect();
+        for (n, (i, p)) in used.iter().enumerate() {
+            let user = &p.used_by[0];
+            let (entry, emitter) = user.split_once('/').unwrap();
+            let target = [(entry.to_string(), emitter.to_string())];
+            let mut mesh = meshes[(i + 1) % meshes.len()].clone();
+            if n == 1 {
+                mesh.colors = mesh.positions.iter().map(|p| [p[0].abs().min(1.0), 0.5, 2.0, -1.0]).collect();
+                mesh.uv1 = mesh.positions.iter().map(|p| [p[1], p[2]]).collect();
+                mesh.normals = mesh.positions.iter().map(|p| [p[0], 0.0, p[2]]).collect();
+            }
+            if n == 2 {
+                (mesh.colors, mesh.uv1, mesh.normals) = (Vec::new(), Vec::new(), Vec::new());
+            }
+            match add_primitive_for_emitters(&bytes, &p.name, &format!("forge_mesh_{n}"), &mesh, &target) {
+                Ok(out) => text.extend(format!("{user} {:#x}\n", fnv(&out)).bytes()),
+                Err(e) => text.extend(format!("{user} {e:#}\n").bytes()),
+            }
+        }
+        if let Some((_, p)) = used.first() {
+            let bad = add_primitive_for_emitters(&bytes, &p.name, &p.name, &meshes[0], &[]).is_err();
+            let wrong = add_primitive_for_emitters(&bytes, &p.name, "forge_x", &meshes[0], &[("none".into(), "none".into())]).is_err();
+            text.extend(format!("{bad} {wrong}\n").bytes());
+        }
+    }
+    println!("{count} primitives, hash {:#x}", fnv(&text));
+    if let Ok(dir) = std::env::var("FORGE_TEST_GLB") {
+        let mut glbs: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        glbs.sort();
+        let mut text = Vec::new();
+        for glb in glbs.iter().filter(|p| p.extension().is_some_and(|e| e == "glb")) {
+            text.extend(format!("{:?}\n", from_gltf(&std::fs::read(glb).unwrap()).map_err(|e| e.to_string())).bytes());
+        }
+        println!("{} glbs, hash {:#x}", glbs.len(), fnv(&text));
+    }
+    assert!(count > 10);
+    assert_eq!(fnv(&text), MESHES);
+}
+const MESHES: u64 = 0x0c3c67db8a5efcb8;
+
+/// The field table: every row's id, place and kind, every value it reads from every emitter of ef_pit and
+/// ef_common, and what each row reads back after being set to edge values on a few emitters, pinned by a hash.
+#[test]
+fn fields_are_unchanged() {
+    let table = fields::table();
+    let mut text = Vec::new();
+    for a in table {
+        text.extend(format!("{} | {} | {} | {} | {:?}\n", a.id, a.group, a.label, a.doc, a.kind).bytes());
+    }
+    text.extend(format!("{:?}\n", fields::GROUPS).bytes());
+    println!("{} rows, table hash {:#x}", table.len(), fnv(&text));
+    let files: Vec<PathBuf> = [pit(), common()].into_iter().flatten().collect();
+    let mut tried = 0;
+    for path in &files {
+        let file = effect_library::NamcoEffectFile::load(&std::fs::read(path).unwrap()).unwrap();
+        let mut all = Vec::new();
+        fn walk<'a>(list: &'a [effect_library::Emitter], out: &mut Vec<&'a effect_library::EmitterData>) {
+            for e in list {
+                out.push(&e.data);
+                walk(&e.children, out);
+            }
+        }
+        for set in &file.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets {
+            walk(&set.emitters, &mut all);
+        }
+        for d in &all {
+            text.extend(format!("{:?}\n", fields::read_all(d)).bytes());
+        }
+        // Set each row on emitters with and without the optional blocks.
+        let picks: Vec<_> = [all.iter().position(|d| d.sampler2.is_some() && d.texture_anim0.is_some()), all.iter().position(|d| d.sampler1.is_none()), Some(0)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let values = [AttrValue::Int(-5), AttrValue::Int(300), AttrValue::UInt(u64::MAX), AttrValue::Float(3.6), AttrValue::Float(-70000.5), AttrValue::Int(1), AttrValue::Int(i64::MIN)];
+        for &p in &picks {
+            assert!(!fields::write(&mut all[p].clone(), "no.such", AttrValue::Int(0)));
+            for a in table {
+                for v in values {
+                    let mut d = all[p].clone();
+                    assert!(fields::write(&mut d, a.id, v));
+                    text.extend(format!("{:?} ", (a.get)(&d)).bytes());
+                    tried += 1;
+                }
+                text.push(b'\n');
+            }
+        }
+    }
+    println!("{tried} sets, hash {:#x}", fnv(&text));
+    assert!(tried > 1000);
+    assert_eq!(fnv(&text), FIELDS);
+}
+const FIELDS: u64 = 0xe01372aeb90903b3;
