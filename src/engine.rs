@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use crate::eff::fields::{self, AttrValue};
 use crate::eff::mesh_io::{self, MeshData};
 use crate::eff::model::{load_effect, EmitterDef, LoadedEffect};
-use crate::eff::edits::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureAddition, TransplantOp};
+use crate::eff::edits::{AuthoredEdit, EffMod, EmitterFieldEdits, EmitterRoster, EmitterSlot, TextureAddition, TransplantOp};
 
 /// The template a new texture takes its format and size from. It keeps colour; the 512 template
 /// (ef_cmn_impactflash00) keeps only alpha.
@@ -165,6 +165,7 @@ impl Doc {
                 src_set_name: entry.to_string(),
                 src_set_idx: set_idx,
                 replace_entry: None,
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -180,10 +181,134 @@ impl Doc {
         Ok(backup)
     }
 
+    /// A new effect, `name`, made of a starter piece's layers.
+    pub fn new_effect(&self, name: &str, piece: &Piece) -> Result<Self> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("the new effect needs a name"));
+        }
+        if self.loaded.entries.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+            return Err(anyhow!("this file already has an effect called {name}"));
+        }
+        self.from_piece(piece, TransplantOp { new_entry_name: name.to_string(), ..Default::default() }, game_root())
+    }
+
+    /// A starter piece's layers added to `entry`, after the ones it has.
+    pub fn add_layer(&self, entry: &str, piece: &Piece) -> Result<Self> {
+        self.from_piece(piece, TransplantOp { into_entry: Some(entry.to_string()), ..Default::default() }, game_root())
+    }
+
+    /// `op` with the piece as its donor, read from under `root`.
+    pub(crate) fn from_piece(&self, piece: &Piece, op: TransplantOp, root: Option<PathBuf>) -> Result<Self> {
+        let root = root.ok_or_else(|| anyhow!("choose the game files folder first: the kit is read from the game's own effects"))?;
+        let op = TransplantOp {
+            src_file_rel: piece.file.clone(),
+            src_set_name: piece.effect.clone(),
+            only_emitters: piece.layers.clone(),
+            ..op
+        };
+        self.rebuilt_from(&EffMod { transplants: vec![op], ..Default::default() }, Some(&root))
+    }
+
+    /// The effect without layer `emitter_idx` (and the layers under it).
+    pub fn remove_layer(&self, entry: &str, set_idx: usize, emitter_idx: usize) -> Result<Self> {
+        let emitters = self.emitters(set_idx);
+        let gone = emitters.get(emitter_idx).ok_or_else(|| anyhow!("no layer {emitter_idx}"))?;
+        // its children follow it, deeper than it
+        let end = emitters[emitter_idx + 1..].iter().position(|e| e.depth <= gone.depth)
+            .map_or(emitters.len(), |n| emitter_idx + 1 + n);
+        if end - emitter_idx == emitters.len() {
+            return Err(anyhow!("that is every layer the effect has; an effect needs one"));
+        }
+        let slots = emitters.iter().enumerate().filter(|(i, _)| !(emitter_idx..end).contains(i))
+            .map(|(i, e)| EmitterSlot { source_idx: i, source_name: e.name.clone(), name: e.name.clone(), depth: e.depth, source_set: String::new() })
+            .collect();
+        let roster = EmitterRoster {
+            set_name: self.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+            entry_name: entry.to_string(),
+            set_idx,
+            slots,
+        };
+        self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })
+    }
+
     fn rebuilt(&self, eff: &EffMod) -> Result<Self> {
-        let bytes = crate::eff::writer::rebuild(&self.bytes, eff, None)?;
+        self.rebuilt_from(eff, None)
+    }
+
+    /// With the file's place in the game, so an effect copied in gets the type its spawns need, and `root` for donors
+    /// from other files.
+    fn rebuilt_from(&self, eff: &EffMod, root: Option<&Path>) -> Result<Self> {
+        let mut eff = eff.clone();
+        if eff.source_rel.is_empty() {
+            eff.source_rel = place_in_game(&self.path);
+        }
+        let bytes = crate::eff::writer::rebuild(&self.bytes, &eff, root)?;
         Self::from_bytes(self.path.clone(), bytes)
     }
+}
+
+/// Where a file sits in the game, as `effect/fighter/<name>/<file>.eff`: from its own path, or, for a tuned file, from
+/// the built file it goes back into. Empty when neither says. The writer gives an effect copied into a fighter's file
+/// the fighter type its spawns need.
+pub fn place_in_game(path: &Path) -> String {
+    let from = |path: &Path| -> Option<String> {
+        let parts: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+        let at = parts.iter().rposition(|p| p == "effect")?;
+        Some(parts[at..].join("/"))
+    };
+    from(path)
+        .or_else(|| Tuned::is_tuned_file(path).then(|| Tuned::load(path).into).flatten().and_then(|into| from(&into)))
+        .unwrap_or_default()
+}
+
+/// One of the game's own layers (or a few that play together) to start an effect from or add to one. `file` is under
+/// the game root ([`game_root`]).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Piece {
+    pub group: String,
+    pub name: String,
+    pub blurb: String,
+    pub file: String,
+    pub effect: String,
+    pub layers: Vec<String>,
+}
+
+/// The starter kit, from `kit.json`.
+pub fn kit() -> &'static [Piece] {
+    static KIT: std::sync::OnceLock<Vec<Piece>> = std::sync::OnceLock::new();
+    KIT.get_or_init(|| serde_json::from_str(include_str!("kit.json")).expect("kit.json"))
+}
+
+fn game_root_file() -> PathBuf {
+    crate::scratch_dirs::app_storage_root().join("game_root.txt")
+}
+
+/// The folder holding the game's `effect` folder, which the kit's pieces are read from: `FORGE_GAME_ROOT`, else the one
+/// chosen in the window. `None` until there is one.
+pub fn game_root() -> Option<PathBuf> {
+    let chosen = std::env::var_os("FORGE_GAME_ROOT").map(PathBuf::from)
+        .or_else(|| std::fs::read_to_string(game_root_file()).ok().map(|s| PathBuf::from(s.trim())))?;
+    holding_effect(&chosen)
+}
+
+/// `dir` if it holds an `effect` folder, its parent if it is one.
+fn holding_effect(dir: &Path) -> Option<PathBuf> {
+    if dir.join("effect").is_dir() {
+        Some(dir.to_path_buf())
+    } else if dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("effect")) && dir.is_dir() {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+/// Remember `dir` as the game root. Fails when it holds no `effect` folder.
+pub fn set_game_root(dir: &Path) -> Result<PathBuf> {
+    let root = holding_effect(dir).ok_or_else(|| anyhow!("{} has no effect folder in it", dir.display()))?;
+    std::fs::create_dir_all(crate::scratch_dirs::app_storage_root())?;
+    std::fs::write(game_root_file(), root.display().to_string())?;
+    Ok(root)
 }
 
 /// Effects tuned by hand, kept in a file of their own so a rebuild of the generated file can't overwrite them. The
@@ -246,8 +371,9 @@ impl Doc {
                 src_set_name: entry.to_string(),
                 src_set_idx: set_idx,
                 replace_entry: entry_names(&bytes)?.iter().any(|n| n.eq_ignore_ascii_case(entry)).then(|| entry.to_string()),
+                ..Default::default()
             };
-            let eff = EffMod { transplants: vec![op], ..Default::default() };
+            let eff = EffMod { source_rel: place_in_game(&self.path), transplants: vec![op], ..Default::default() };
             let staged = crate::eff::writer::rebuild(&bytes, &eff, working.parent())?;
             std::fs::write(tuned_path, staged)?;
         } else {
@@ -278,7 +404,7 @@ pub fn merge_tuned(tuned_path: &Path, into: &[u8]) -> Result<(Vec<u8>, usize)> {
     let donor = std::fs::read(tuned_path).with_context(|| format!("reading {}", tuned_path.display()))?;
     let donor_names = entry_names(&donor)?;
     let names = entry_names(into)?;
-    let mut eff = EffMod::default();
+    let mut eff = EffMod { source_rel: place_in_game(tuned_path), ..Default::default() };
     for entry in &tuned.effects {
         let Some(set_idx) = donor_names.iter().position(|n| n.eq_ignore_ascii_case(entry)) else {
             crate::log::note(&format!("tuned list names {entry}, which the tuned file doesn't have"));
@@ -290,6 +416,7 @@ pub fn merge_tuned(tuned_path: &Path, into: &[u8]) -> Result<(Vec<u8>, usize)> {
             src_set_name: entry.clone(),
             src_set_idx: set_idx,
             replace_entry: names.iter().any(|n| n.eq_ignore_ascii_case(entry)).then(|| entry.clone()),
+            ..Default::default()
         });
     }
     let count = eff.transplants.len();

@@ -24,6 +24,106 @@ pub(super) fn merge_container(dest: &mut Option<Vec<u8>>, donor: &[u8], what: &s
     Ok(base)
 }
 
+/// The emitters of `emitters` that `names` names, each with its children, in file order. An emitter named as well as
+/// its parent comes along with the parent; one whose parent is not named comes out as a top-level emitter.
+fn pick_emitters(
+    emitters: Vec<effect_library::structs::Emitter>,
+    names: &[String],
+    picked: &mut Vec<effect_library::structs::Emitter>,
+) {
+    for mut em in emitters {
+        if names.iter().any(|n| em.data.display_name().eq_ignore_ascii_case(n)) {
+            picked.push(em);
+        } else {
+            pick_emitters(std::mem::take(&mut em.children), names, picked);
+        }
+    }
+}
+
+/// Narrow `sets` to the op's `only_emitters`. Fails when none of them is there.
+fn narrow_to_picked(op: &TransplantOp, sets: &mut [effect_library::structs::EmitterSet]) -> Result<()> {
+    if op.only_emitters.is_empty() {
+        return Ok(());
+    }
+    let mut found = 0;
+    for set in sets.iter_mut() {
+        let mut picked = Vec::new();
+        pick_emitters(std::mem::take(&mut set.emitters), &op.only_emitters, &mut picked);
+        found += picked.len();
+        set.emitters = picked;
+    }
+    if found == 0 {
+        anyhow::bail!(
+            "'{}' has none of the layers {:?}",
+            op.src_set_name,
+            op.only_emitters
+        );
+    }
+    Ok(())
+}
+
+/// Give `em` and its children names `taken` does not hold yet (`<name>_2`, `_3`, ...), and add them to it.
+fn rename_unused(em: &mut effect_library::structs::Emitter, taken: &mut Vec<String>) {
+    let name = em.data.display_name();
+    if taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+        let fresh = (2..)
+            .map(|n| format!("{name}_{n}"))
+            .find(|n| !taken.iter().any(|t| t.eq_ignore_ascii_case(n)))
+            .unwrap();
+        super::emitters::set_emitter_name(&mut em.data, &fresh);
+        em.cached_binary = None;
+        taken.push(fresh);
+    } else {
+        taken.push(name);
+    }
+    for child in &mut em.children {
+        rename_unused(child, taken);
+    }
+}
+
+/// Every emitter name in `emitters`, children included.
+fn emitter_names(emitters: &[effect_library::structs::Emitter]) -> Vec<String> {
+    let mut names = Vec::new();
+    visit_emitters_ref(emitters, &mut |em| names.push(em.data.display_name()));
+    names
+}
+
+/// Add `donor_sets`' emitters to the set of the one-part effect `target`, as more layers.
+fn add_layers(
+    namco: &mut effect_library::NamcoEffectFile,
+    target: &str,
+    donor_sets: Vec<effect_library::structs::EmitterSet>,
+) -> Result<()> {
+    let ti = namco
+        .entry_names
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(target))
+        .ok_or_else(|| anyhow!("no effect '{target}' to add layers to"))?;
+    let entry = &namco.entries[ti];
+    if entry.variant_count != 0 {
+        anyhow::bail!("'{target}' plays in parts; layers can only be added to a one-part effect");
+    }
+    let set_idx = (entry.emitter_set_id as usize)
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("'{target}' has no emitter set"))?;
+    let set = namco
+        .ptcl_file
+        .as_mut()
+        .ok_or_else(|| anyhow!("eff has no embedded PTCL"))?
+        .emitter_list
+        .emitter_sets
+        .get_mut(set_idx)
+        .ok_or_else(|| anyhow!("'{target}' names emitter set {set_idx}, which is out of range"))?;
+    let mut taken = emitter_names(&set.emitters);
+    for donor in donor_sets {
+        for mut em in donor.emitters {
+            rename_unused(&mut em, &mut taken);
+            set.emitters.push(em);
+        }
+    }
+    Ok(())
+}
+
 /// Duplicate a donor entry's emitter set(s) within the same eff under a new entry name —
 /// the ACMD side then retargets the fighter's call to `new_entry_name`, leaving the
 /// original entry vanilla for everyone else.
@@ -32,6 +132,7 @@ pub(super) fn apply_transplant_same_file(
     op: &TransplantOp,
 ) -> Result<()> {
     if op.replace_entry.is_none()
+        && op.into_entry.is_none()
         && namco
             .entry_names
             .iter()
@@ -56,6 +157,25 @@ pub(super) fn apply_transplant_same_file(
         })?;
     let donor = namco.entries[donor_idx].clone();
 
+    if let Some(target) = &op.into_entry {
+        let sets = &namco
+            .ptcl_file
+            .as_ref()
+            .ok_or_else(|| anyhow!("eff has no embedded PTCL"))?
+            .emitter_list
+            .emitter_sets;
+        let mut donor_sets = Vec::new();
+        for raw in entry_set_ids(namco, &donor)? {
+            donor_sets.push(
+                sets.get(raw as usize - 1)
+                    .ok_or_else(|| anyhow!("donor emitter set id {raw} out of range"))?
+                    .clone(),
+            );
+        }
+        narrow_to_picked(op, &mut donor_sets)?;
+        return add_layers(namco, target, donor_sets);
+    }
+
     let ptcl = namco
         .ptcl_file
         .as_mut()
@@ -76,6 +196,7 @@ pub(super) fn apply_transplant_same_file(
                 .clone();
             let mut new_set = src;
             new_set.name = op.new_entry_name.clone();
+            narrow_to_picked(op, std::slice::from_mut(&mut new_set))?;
             sets.push(new_set);
             Ok(sets.len() as u32) // raw 1-based handle of the appended set
         };
@@ -107,6 +228,28 @@ pub(super) fn apply_transplant_same_file(
         new_entry.variant_start_idx = new_start;
     }
     finish_transplant_entry(namco, op, new_entry)
+}
+
+/// The raw (1-based) emitter set ids an entry plays: its own set, then its parts'.
+fn entry_set_ids(
+    namco: &effect_library::NamcoEffectFile,
+    entry: &effect_library::namco_file::EffectHeader,
+) -> Result<Vec<u32>> {
+    let mut ids = Vec::new();
+    if entry.emitter_set_id != 0 {
+        ids.push(entry.emitter_set_id);
+    }
+    if entry.variant_count != 0 {
+        let start = (entry.variant_start_idx as usize)
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("donor variant start id 0"))?;
+        let parts = namco
+            .effect_variants
+            .get(start..start + entry.variant_count as usize)
+            .ok_or_else(|| anyhow!("donor variant range out of bounds"))?;
+        ids.extend(parts.iter().filter(|v| v.emitter_set_id != 0).map(|v| v.emitter_set_id as u32));
+    }
+    Ok(ids)
 }
 
 /// Append `new_entry` under the op's new name, or — replace mode — repoint an existing
@@ -150,6 +293,7 @@ pub(super) fn apply_transplant_cross_file(
     destination_is_fighter: bool,
 ) -> Result<()> {
     if op.replace_entry.is_none()
+        && op.into_entry.is_none()
         && namco
             .entry_names
             .iter()
@@ -234,6 +378,9 @@ pub(super) fn apply_transplant_cross_file(
             );
         }
     }
+
+    // Only the chosen layers, so only their textures, models and shaders come along.
+    narrow_to_picked(op, &mut donor_sets)?;
 
     // Collect the resources the donor emitters reference.
     let mut tex_ids: Vec<u64> = Vec::new();
@@ -468,6 +615,13 @@ pub(super) fn apply_transplant_cross_file(
             em.cached_binary = None; // indices moved → cached EMTR blob is stale
         });
     };
+
+    if let Some(target) = &op.into_entry {
+        for set in &mut donor_sets {
+            remap(set);
+        }
+        return add_layers(namco, target, donor_sets);
+    }
 
     // LIVE REPLACE-IN-PLACE: replacing a single-set target with a single-set donor overwrites
     // the target entry's OWN emitter set in place — the entry name + set index are unchanged,

@@ -1,0 +1,292 @@
+[
+ {
+  "group": "Sparks",
+  "name": "Hit sparks",
+  "blurb": "Thin streaks thrown out from a hit.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_NORMAL",
+  "layers": [
+   "spark1"
+  ]
+ },
+ {
+  "group": "Sparks",
+  "name": "Slash streaks",
+  "blurb": "Long cutting lines across a hit.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_CUT",
+  "layers": [
+   "spark1"
+  ]
+ },
+ {
+  "group": "Sparks",
+  "name": "Fire sparks",
+  "blurb": "Hot sparks that fly out and fall.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_FIRE",
+  "layers": [
+   "spark1"
+  ]
+ },
+ {
+  "group": "Sparks",
+  "name": "Electric sparks",
+  "blurb": "Jagged lightning bolts.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_ELEC",
+  "layers": [
+   "lightning1"
+  ]
+ },
+ {
+  "group": "Flashes",
+  "name": "Impact flash",
+  "blurb": "A bright burst at the point of impact.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_NORMAL",
+  "layers": [
+   "flash1"
+  ]
+ },
+ {
+  "group": "Flashes",
+  "name": "Glow",
+  "blurb": "A soft round glow.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_NORMAL",
+  "layers": [
+   "flare1_add"
+  ]
+ },
+ {
+  "group": "Flashes",
+  "name": "Flash lines",
+  "blurb": "Rays bursting outward.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_NORMAL",
+  "layers": [
+   "flashline1"
+  ]
+ },
+ {
+  "group": "Flashes",
+  "name": "Big flash",
+  "blurb": "A large, bright explosion flash.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_EXPLOSION_FLASH",
+  "layers": [
+   "flash1"
+  ]
+ },
+ {
+  "group": "Rings",
+  "name": "Hit ring",
+  "blurb": "A ring that spreads out from a hit.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_NORMAL",
+  "layers": [
+   "ring1"
+  ]
+ },
+ {
+  "group": "Rings",
+  "name": "Shockwave",
+  "blurb": "A sharp cutting shockwave.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_CUT",
+  "layers": [
+   "shockwave1"
+  ]
+ },
+ {
+  "group": "Rings",
+  "name": "Fire ring",
+  "blurb": "A burning ring along the ground.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_GROUND_SHOCKWAVE",
+  "layers": [
+   "ring"
+  ]
+ },
+ {
+  "group": "Rings",
+  "name": "Electric ring",
+  "blurb": "A crackling ring of lightning.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_ELEC",
+  "layers": [
+   "lightningring1"
+  ]
+ },
+ {
+  "group": "Fire",
+  "name": "Rising flames",
+  "blurb": "Flames that rise and fade.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_DAMAGE_FIRE",
+  "layers": [
+   "fire1"
+  ]
+ },
+ {
+  "group": "Fire",
+  "name": "Burning aura",
+  "blurb": "Fire that clings around a body.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_FINAL_AURA",
+  "layers": [
+   "fire1_alpha"
+  ]
+ },
+ {
+  "group": "Fire",
+  "name": "Embers",
+  "blurb": "Small glowing bits that float.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_FINAL_AURA",
+  "layers": [
+   "particle1"
+  ]
+ },
+ {
+  "group": "Fire",
+  "name": "Fire burst",
+  "blurb": "A burst of flame at a hit.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_HIT_FIRE",
+  "layers": [
+   "fireImpact1"
+  ]
+ },
+ {
+  "group": "Smoke",
+  "name": "Smoke puff",
+  "blurb": "A puff of smoke that spreads.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_LANDING_SMOKE",
+  "layers": [
+   "smoke2"
+  ]
+ },
+ {
+  "group": "Smoke",
+  "name": "Dust",
+  "blurb": "Dust kicked up off the ground.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_DASH_SMOKE",
+  "layers": [
+   "smoke1"
+  ]
+ },
+ {
+  "group": "Smoke",
+  "name": "Steam",
+  "blurb": "Soft rising steam.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_ASSIST_STEAM",
+  "layers": [
+   "smoke1"
+  ]
+ },
+ {
+  "group": "Smoke",
+  "name": "Dark smoke",
+  "blurb": "Thick smoke above a fire.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_DAMAGE_FIRE",
+  "layers": [
+   "smoke1"
+  ]
+ },
+ {
+  "group": "Trails",
+  "name": "Fire trail",
+  "blurb": "Flame left behind as it moves.",
+  "file": "effect/fighter/roy/ef_roy.eff",
+  "effect": "ROY_FIRE",
+  "layers": [
+   "fire1_b"
+  ]
+ },
+ {
+  "group": "Trails",
+  "name": "Speed lines",
+  "blurb": "Streaks that show speed.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_ATTACK_LINE",
+  "layers": [
+   "line1"
+  ]
+ },
+ {
+  "group": "Beams",
+  "name": "Blaster bolt",
+  "blurb": "A glowing bolt that flies straight.",
+  "file": "effect/fighter/fox/ef_fox.eff",
+  "effect": "FOX_BLASTER_BULLET",
+  "layers": [
+   "bullet1"
+  ]
+ },
+ {
+  "group": "Beams",
+  "name": "Bolt glow",
+  "blurb": "The glow around a flying bolt.",
+  "file": "effect/fighter/fox/ef_fox.eff",
+  "effect": "FOX_BLASTER_BULLET",
+  "layers": [
+   "flare1_2"
+  ]
+ },
+ {
+  "group": "Slashes",
+  "name": "Sword arc",
+  "blurb": "A swung sword's arc.",
+  "file": "effect/fighter/roy/ef_roy.eff",
+  "effect": "ROY_MC_1",
+  "layers": [
+   "trace1"
+  ]
+ },
+ {
+  "group": "Slashes",
+  "name": "Flame arc",
+  "blurb": "A swing that leaves fire.",
+  "file": "effect/fighter/roy/ef_roy.eff",
+  "effect": "ROY_BLAZER_SLASH",
+  "layers": [
+   "ArcTrail"
+  ]
+ },
+ {
+  "group": "Slashes",
+  "name": "Light arc",
+  "blurb": "A bright cutting arc.",
+  "file": "effect/fighter/roy/ef_roy.eff",
+  "effect": "ROY_BLAZER_SLASH",
+  "layers": [
+   "ArcLight"
+  ]
+ },
+ {
+  "group": "Bits",
+  "name": "Debris",
+  "blurb": "Rocks thrown up from the ground.",
+  "file": "effect/system/common/ef_common.eff",
+  "effect": "SYS_SOIL_LANDING",
+  "layers": [
+   "stone1"
+  ]
+ },
+ {
+  "group": "Bits",
+  "name": "Powder",
+  "blurb": "Fine glowing dust.",
+  "file": "effect/fighter/roy/ef_roy.eff",
+  "effect": "ROY_BLAZER_SLASH",
+  "layers": [
+   "powder"
+  ]
+ }
+]

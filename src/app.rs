@@ -13,7 +13,7 @@ use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, TextureHandle, Textu
 use crate::eff::fields::AttrValue;
 use crate::eff::mesh_io::{self, MeshData};
 use crate::eff::model::EmitterDef;
-use crate::engine::{attr, mirror, quarter_turn, Doc, Pending, Target, Tuned};
+use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned};
 use crate::preview::Preview as GamePreview;
 
 enum Job {
@@ -22,6 +22,12 @@ enum Job {
     Texture(Target, PathBuf),
     Mesh(Target, MeshData),
     Duplicate(String, usize, String),
+    /// A new effect of this name from a piece of the kit.
+    NewEffect(String, &'static Piece),
+    /// A piece of the kit added to an effect as more layers.
+    AddLayer(String, &'static Piece),
+    /// Layer n of an effect (and the layers under it) taken out.
+    RemoveLayer(String, usize, usize),
     Save,
     /// Copy an effect into the tuned file.
     Stage(String, usize, PathBuf),
@@ -82,6 +88,8 @@ pub struct App {
     /// The game's shaders have drawn a frame.
     drawn: bool,
     new_name: String,
+    /// The name for an effect made from the kit.
+    create_name: String,
     /// The model being turned or newly loaded, not yet applied.
     draft_mesh: Option<MeshData>,
     preview: Option<Preview>,
@@ -126,7 +134,7 @@ impl App {
         let mut app = Self {
             doc: None, busy: None, status: "Open an .eff file to begin.".into(), done, done_tx,
             filter: String::new(), effect: None, emitter: 0, pending: Pending::new(), applying: Pending::new(), unsaved: false, recent: read_recent(), sweep: sweep.then_some(0), edit_started: None, edit_kept: true, shot, drawn: false,
-            new_name: String::new(), draft_mesh: None, preview: None, orbit: Vec2::ZERO,
+            new_name: String::new(), create_name: String::new(), draft_mesh: None, preview: None, orbit: Vec2::ZERO,
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
@@ -155,6 +163,10 @@ impl App {
                 Job::Texture(target, png) => Done::Doc(doc.expect("doc").replace_texture(&target, &png), "Texture swapped".into()),
                 Job::Mesh(target, mesh) => Done::Doc(doc.expect("doc").replace_mesh(&target, &mesh), "Model swapped".into()),
                 Job::Duplicate(entry, set, name) => Done::Doc(doc.expect("doc").duplicate(&entry, set, &name), format!("Duplicated as {name}")),
+                Job::NewEffect(name, piece) => Done::Doc(doc.expect("doc").new_effect(&name, piece),
+                    format!("Made {name} from {}. Keep my tuning to have rebuilds keep it", piece.name)),
+                Job::AddLayer(entry, piece) => Done::Doc(doc.expect("doc").add_layer(&entry, piece), format!("Added {}", piece.name)),
+                Job::RemoveLayer(entry, set, layer) => Done::Doc(doc.expect("doc").remove_layer(&entry, set, layer), "Layer removed".into()),
                 Job::Stage(entry, set, tuned) => Done::Tuned(doc.expect("doc").stage(&entry, set, &tuned), format!("{entry} kept in {}", tuned.display())),
                 Job::Merge(tuned, into) => Done::Tuned(
                     std::fs::read(&into).map_err(anyhow::Error::from)
@@ -173,6 +185,7 @@ impl App {
                 Done::Doc(Ok(doc), note) => {
                     if let Some(name) = self.select.take() {
                         self.effect = doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&name));
+                        self.emitter = 0;
                     }
                     if note == "Opened" {
                         self.borrowed.clear();
@@ -334,6 +347,7 @@ impl App {
             }
             return;
         };
+        self.new_effect_row(ui, &doc);
         let filter = self.filter.to_lowercase();
         let list = doc.effects();
         let tuned = self.tuned.clone().unwrap_or_default();
@@ -356,6 +370,64 @@ impl App {
             self.emitter = 0;
             self.preview = None;
         }
+    }
+
+    /// Making an effect: a name, then a piece of the kit to start it from.
+    fn new_effect_row(&mut self, ui: &mut egui::Ui, doc: &Doc) {
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.create_name).hint_text("new effect name").desired_width(120.0));
+            let name = self.create_name.trim().to_string();
+            let taken = doc.effects().iter().any(|(n, _)| n.eq_ignore_ascii_case(&name));
+            let ready = self.busy.is_none() && self.pending.is_empty() && !name.is_empty() && !taken;
+            let hint = if taken { "This file already has an effect of that name." } else { "Name it, then pick the first layer from the game's own." };
+            ui.add_enabled_ui(ready, |ui| {
+                ui.menu_button("New effect", |ui| {
+                    if let Some(piece) = self.kit_menu(ui) {
+                        self.select = Some(name.clone());
+                        self.create_name.clear();
+                        self.run(Job::NewEffect(name.clone(), piece), "Making the effect");
+                    }
+                })
+                .response
+                .on_hover_text(hint)
+                .on_disabled_hover_text(hint);
+            });
+        });
+    }
+
+    /// The kit by group, or the folder it is read from when there is none yet. The piece picked, if one was.
+    fn kit_menu(&mut self, ui: &mut egui::Ui) -> Option<&'static Piece> {
+        if game_root().is_none() {
+            ui.label("The kit is read from the game's own effect files.");
+            if ui.button("Choose game files folder…").on_hover_text("The dumped game folder that holds the effect folder (effect/system/common/ef_common.eff).").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    match set_game_root(&dir) {
+                        Ok(root) => self.status = format!("Kit reads from {}", root.display()),
+                        Err(e) => self.status = format!("{e:#}"),
+                    }
+                }
+                ui.close();
+            }
+            return None;
+        }
+        let mut picked = None;
+        let mut groups: Vec<&str> = Vec::new();
+        for piece in kit() {
+            if !groups.contains(&piece.group.as_str()) {
+                groups.push(&piece.group);
+            }
+        }
+        for group in groups {
+            ui.menu_button(group, |ui| {
+                for piece in kit().iter().filter(|p| p.group == group) {
+                    if ui.button(&piece.name).on_hover_text(&piece.blurb).clicked() {
+                        picked = Some(piece);
+                        ui.close();
+                    }
+                }
+            });
+        }
+        picked
     }
 
     /// The game's shaders, once this file's are translated. False while they aren't.
@@ -521,7 +593,33 @@ impl App {
         let idle = self.busy.is_none();
         self.tuning_row(ui, doc, entry, set_idx, idle);
         let emitters: Vec<EmitterDef> = doc.emitters(set_idx).to_vec();
-        ui.label("Layers");
+        ui.horizontal(|ui| {
+            ui.label("Layers");
+            // values not yet in the file are kept by layer number, which adding or removing would shift
+            let ready = idle && self.pending.is_empty() && self.applying.is_empty();
+            ui.add_enabled_ui(ready, |ui| {
+                ui.menu_button("Add layer", |ui| {
+                    if let Some(piece) = self.kit_menu(ui) {
+                        self.emitter = emitters.len();
+                        self.preview = None;
+                        self.run(Job::AddLayer(entry.to_string(), piece), "Adding the layer");
+                    }
+                })
+                .response
+                .on_hover_text("One of the game's own layers, copied in with its texture, model and shader.");
+                let last = emitters.len() <= 1;
+                if ui.add_enabled(!last, egui::Button::new("Remove layer"))
+                    .on_hover_text("Takes out the selected layer and any under it.")
+                    .on_disabled_hover_text("An effect needs at least one layer.")
+                    .clicked()
+                {
+                    let layer = self.emitter;
+                    self.emitter = 0;
+                    self.preview = None;
+                    self.run(Job::RemoveLayer(entry.to_string(), set_idx, layer), "Removing the layer");
+                }
+            });
+        });
         let mut picked = None;
         for (i, em) in emitters.iter().enumerate() {
             if ui.selectable_label(self.emitter == i, &em.name).clicked() {

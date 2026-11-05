@@ -10,6 +10,21 @@ The first save keeps a `.forge-backup` beside the file.
 Saved edits live in the `.eff` only: running `bake_slotted.py` rebuilds that file and loses them, unless the effect is
 kept as tuned.
 
+## Making an effect
+
+Type a name under the search box and pick **New effect**: the menu is a starter kit of Smash's own layers (sparks,
+flashes, rings, fire, smoke, trails, beams, slashes, bits; `src/kit.json`). The layer is copied in with its texture,
+model and shader, so it draws in game exactly as it does in Smash. **Add layer** beside the layer list adds more from
+the kit (a name the effect already has gets `_2`), **Remove layer** takes the selected one out with any under it. Then
+shape each layer with the panel and **Save to mod**.
+
+The kit is read from the game's own effect files: the first time, the menu asks for the dumped game folder that holds
+the `effect` folder (or set `FORGE_GAME_ROOT`). Only what the chosen layers use comes along.
+
+A new effect is in the saved file only, so a rebuild of a generated file loses it: **Keep my tuning** on it keeps it
+over rebuilds like any tuned effect. Copied into a fighter's file (one under `effect/fighter/`), an effect gets the
+fighter type its spawns need. The move's script then spawns it by name; Forge does not write scripts.
+
 ## Keeping tuned effects
 
 **Keep my tuning** copies the effect, as it is now, into the repo's tuned file:
@@ -49,7 +64,7 @@ and fades (`src/app/recipes.json`).
 
 - `cargo test --release`: the set and borrow edits must give the same bytes as the Forge of before the 2026-11-04
   cleanup, every other value must survive a rebuild, the particles spawned for all of ef_common are pinned by a hash, every
-  shader of ef_pit must translate, and recipes may only name real fields. They read the extracted arc
+  shader of ef_pit must translate, recipes may only name real fields, and every piece of the kit must make an effect. They read the extracted arc
   (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`).
 
 - Crashes, GPU errors and the effect on screen go to `%APPDATA%/EffectForge/forge.log`.
@@ -59,3 +74,6 @@ and fades (`src/app/recipes.json`).
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> <field> <value>` borrows a shader for every layer of an effect, as the panel does, and prints whose.
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
+- `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece>`, `add-layer <file.eff>
+  <out.eff> <EFFECT> <piece>` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons.
+- `effect_forge layers <file.eff> [EFFECT]` lists each effect's type and layers, with their textures and models.

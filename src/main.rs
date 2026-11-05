@@ -108,6 +108,57 @@ fn main() {
         println!("{} now keeps {:?}", path.display(), tuned.effects);
         return;
     }
+    // Making an effect from the starter kit, as the window does; each writes <out>:
+    //   new-effect <eff> <out> <new name> <piece>    add-layer <eff> <out> <effect> <piece>
+    //   remove-layer <eff> <out> <effect> <layer number>    kit (lists the pieces)
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["kit"] => {
+            for piece in engine::kit() {
+                println!("{:<8} {:<16} {} / {} {:?}", piece.group, piece.name, piece.file, piece.effect, piece.layers);
+            }
+            return;
+        }
+        [cmd @ ("new-effect" | "add-layer" | "remove-layer"), eff, out, name, what] => {
+            let doc = engine::Doc::open(Path::new(eff)).unwrap();
+            let piece = || engine::kit().iter().find(|p| p.name.eq_ignore_ascii_case(what)).expect("a piece of the kit (see: kit)");
+            let effect = || doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).expect("that effect");
+            let made = match *cmd {
+                "new-effect" => doc.new_effect(name, piece()),
+                "add-layer" => doc.add_layer(&effect().0, piece()),
+                _ => {
+                    let (entry, set) = effect();
+                    doc.remove_layer(&entry, set, what.parse().expect("a layer number"))
+                }
+            };
+            match made {
+                Ok(made) => std::fs::write(out, &made.bytes).unwrap(),
+                Err(e) => {
+                    eprintln!("{cmd} failed: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+    // Every effect of a file with its kind and its layers, to pick starter layers from: layers <eff> [effect]
+    if let ["layers", eff, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let bytes = std::fs::read(eff).expect("the file");
+        let file = effect_library::NamcoEffectFile::load(&bytes).expect("an effect file");
+        let doc = engine::Doc::open(Path::new(eff)).unwrap();
+        let tex = |i: Option<u32>| i.and_then(|i| doc.loaded.ptcl.bntx_textures.get(i as usize)).map(|t| t.tex_name.clone());
+        for (name, header) in file.entry_names.iter().zip(&file.entries) {
+            if rest.first().is_some_and(|w| !name.eq_ignore_ascii_case(w)) {
+                continue;
+            }
+            let Some(set) = (header.emitter_set_id as usize).checked_sub(1) else { continue };
+            println!("{name} kind {:#06x} parts {} set {}", header.kind, header.variant_count, doc.loaded.ptcl.emitter_sets[set].name);
+            for em in doc.emitters(set) {
+                println!("  {}{} tex {:?} mesh {:?}", "  ".repeat(em.depth as usize), em.name, tex(em.texture_index), doc.primitive_of(name, &em.name));
+            }
+        }
+        return;
+    }
     // Values across a whole file, to see how the game's own effects use a field: attrs <eff> <id,id,...> [id=value filter]
     if let ["attrs", eff, ids, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).unwrap();

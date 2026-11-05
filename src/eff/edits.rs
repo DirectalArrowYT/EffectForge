@@ -191,7 +191,7 @@ pub struct EmitterFieldEdits {
 
 /// A TRANSPLANT: copy an emitter set from a donor eff into this one, either under a new entry name or replacing an
 /// existing entry in place.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransplantOp {
     pub new_entry_name: String,
     /// Donor .eff relative to the export root ("" = same file as the target).
@@ -202,4 +202,11 @@ pub struct TransplantOp {
     /// redirect needed) instead of being appended as a new entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace_entry: Option<String>,
+    /// Copy only these emitters (by name, each with its children) rather than the whole set. Empty = all of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only_emitters: Vec<String>,
+    /// Add the donor's emitters to this existing effect's set as more layers, instead of making a new effect.
+    /// `new_entry_name` is then unused. An emitter whose name the set already has is renamed `<name>_2`, `_3`, ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into_entry: Option<String>,
 }

@@ -162,6 +162,7 @@ pub fn stage_manifest(carrier: &str, root: &Path, builds_dir: &Path, manifest_re
                 src_set_name: src.clone(),
                 src_set_idx: 0,
                 replace_entry: None,
+                ..Default::default()
             })
             .collect(),
         ..Default::default()

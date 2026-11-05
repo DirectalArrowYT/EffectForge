@@ -504,3 +504,63 @@ fn fields_are_unchanged() {
     assert_eq!(fnv(&text), FIELDS);
 }
 const FIELDS: u64 = 0xe01372aeb90903b3;
+
+/// The folder holding the game's `effect` folder, above `file`.
+fn game_root_above(file: &std::path::Path) -> Option<PathBuf> {
+    file.ancestors().find(|dir| dir.join("effect").is_dir()).map(|dir| dir.to_path_buf())
+}
+
+fn kinds(bytes: &[u8]) -> std::collections::HashMap<String, u16> {
+    let file = effect_library::NamcoEffectFile::load(bytes).expect("the file reads");
+    file.entry_names.iter().cloned().zip(file.entries.iter().map(|e| e.kind)).collect()
+}
+
+/// Every piece of the kit makes an effect in a fighter's file that has the piece's layers, and only those, with the
+/// fighter type the fighter's spawns need.
+#[test]
+fn kit_pieces_make_effects() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let root = game_root_above(&pit);
+    let doc = open(&pit);
+    for (i, piece) in engine::kit().iter().enumerate() {
+        let name = format!("kit_test_{i}");
+        let op = crate::eff::edits::TransplantOp { new_entry_name: name.clone(), ..Default::default() };
+        let made = doc.from_piece(piece, op, root.clone()).unwrap_or_else(|e| panic!("{}: {e:#}", piece.name));
+        let (_, set) = made.effects().into_iter().find(|(n, _)| *n == name).expect("the new effect");
+        let layers: Vec<String> = made.emitters(set).iter().filter(|e| e.depth == 0).map(|e| e.name.clone()).collect();
+        assert_eq!(layers, piece.layers, "{}", piece.name);
+        assert_ne!(kinds(&made.bytes)[&name] & 0xff00, 0, "{} has no fighter type", piece.name);
+    }
+}
+
+/// Layers added to an effect come after its own, renamed when the effect already has the name, and removing one
+/// takes out only it.
+#[test]
+fn layers_add_and_remove() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let root = game_root_above(&pit);
+    let piece = |name: &str| engine::kit().iter().find(|p| p.name == name).expect("a piece of the kit");
+    let doc = open(&pit);
+    let (entry, set) = doc.effects().into_iter().find(|(_, set)| doc.emitters(*set).len() > 1).expect("an effect with layers");
+    let before: Vec<String> = doc.emitters(set).iter().map(|e| e.name.clone()).collect();
+    let add = |doc: &Doc, name: &str| {
+        let op = crate::eff::edits::TransplantOp { into_entry: Some(entry.clone()), ..Default::default() };
+        doc.from_piece(piece(name), op, root.clone()).unwrap()
+    };
+    let doc = add(&add(&doc, "Hit sparks"), "Hit sparks");
+    let after: Vec<String> = doc.emitters(set).iter().map(|e| e.name.clone()).collect();
+    let spark = &piece("Hit sparks").layers[0];
+    let expected: Vec<String> = before.iter().cloned().chain([spark.clone(), format!("{spark}_2")]).collect();
+    assert_eq!(after, expected);
+    let doc = doc.remove_layer(&entry, set, before.len()).unwrap();
+    let left: Vec<String> = doc.emitters(set).iter().map(|e| e.name.clone()).collect();
+    let expected: Vec<String> = before.iter().cloned().chain([format!("{spark}_2")]).collect();
+    assert_eq!(left, expected);
+    // the effect's own layers kept every value
+    let reopened = open(&pit);
+    for (i, em) in reopened.emitters(set).iter().enumerate() {
+        assert_eq!(em.attrs, doc.emitters(set)[i].attrs, "{}", em.name);
+    }
+}
