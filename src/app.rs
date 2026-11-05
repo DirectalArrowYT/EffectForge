@@ -124,6 +124,12 @@ pub struct App {
     chosen: Vec<String>,
     /// Where a shift-click range starts.
     anchor: Option<String>,
+    /// Arrow keys not yet acted on: effects to move down the list (up is negative), with shift held, and frames to
+    /// step the preview.
+    nav: (i32, bool),
+    frame_step: i32,
+    /// Scroll the list to the effect shown, once: it was picked with the keys.
+    reveal: bool,
     settings: Settings,
     /// Since when the file has had changes not saved, counted from the last edit.
     unsaved_since: Option<std::time::Instant>,
@@ -142,6 +148,8 @@ struct ListItems<'a> {
     actions: Vec<ListAction>,
     /// Names in the order drawn, for shift-click ranges.
     drawn: Vec<String>,
+    /// Scroll to the current effect.
+    reveal: bool,
 }
 
 /// What the list was asked to do, done once it is drawn.
@@ -187,7 +195,7 @@ impl App {
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
             project: None, renaming: None, rename_to: String::new(), folder_name: String::new(), folder_edit: None,
-            chosen: Vec::new(), anchor: None,
+            chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
         app.settings.theme.apply(&cc.egui_ctx);
@@ -607,15 +615,26 @@ impl App {
             return;
         }
         let mut picked = None;
+        let reveal = std::mem::take(&mut self.reveal);
+        let shown: Vec<&(String, usize)> = list.iter().filter(|(n, _)| n.to_lowercase().contains(&filter) && (!self.only_tuned || tuned.has(n))).collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (name, set) in list.iter().filter(|(n, _)| n.to_lowercase().contains(&filter) && (!self.only_tuned || tuned.has(n))) {
+            for (name, set) in &shown {
                 let on = self.effect.as_ref().is_some_and(|e| &e.0 == name);
                 let label = if tuned.has(name) { format!("\u{2605} {name}") } else { name.clone() };
-                if ui.selectable_label(on, label).clicked() {
+                let response = ui.selectable_label(on, label);
+                if on && reveal {
+                    response.scroll_to_me(None);
+                }
+                if response.clicked() {
                     picked = Some((name.clone(), *set));
                 }
             }
         });
+        let names: Vec<String> = shown.iter().map(|(n, _)| n.clone()).collect();
+        if let Some(name) = step(&names, self.effect.as_ref().map(|e| e.0.as_str()), std::mem::take(&mut self.nav.0)) {
+            picked = shown.iter().find(|(n, _)| *n == name).map(|(n, s)| (n.clone(), *s));
+            self.reveal = true;
+        }
         if let Some(effect) = picked {
             self.effect = Some(effect);
             self.emitter = 0;
@@ -649,6 +668,7 @@ impl App {
             folders: project.folders.iter().map(|f| f.name.clone()).collect(),
             actions: Vec::new(),
             drawn: Vec::new(),
+            reveal: std::mem::take(&mut self.reveal),
         };
         let folder_edit = &mut self.folder_edit;
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -720,7 +740,14 @@ impl App {
                 items.actions.push(ListAction::Move((*names).clone(), None));
             }
         });
-        let ListItems { actions, drawn, .. } = items;
+        let ListItems { mut actions, drawn, .. } = items;
+        if let Some(name) = step(&drawn, self.effect.as_ref().map(|e| e.0.as_str()), std::mem::take(&mut self.nav.0)) {
+            if let Some((_, set)) = list.iter().find(|(n, _)| *n == name) {
+                let keys = egui::Modifiers { shift: self.nav.1, ..Default::default() };
+                actions.push(ListAction::Pick(name, *set, keys));
+                self.reveal = true;
+            }
+        }
         for action in actions {
             match action {
                 ListAction::Pick(name, set, keys) => {
@@ -840,6 +867,11 @@ impl App {
         let emitter = self.emitter;
         let length = game.length(doc, set_idx);
         let now = std::time::Instant::now();
+        let frames = std::mem::take(&mut self.frame_step);
+        if frames != 0 {
+            game.playing = false;
+            game.age = (game.age.round() + frames as f32).clamp(0.0, length);
+        }
         if game.playing {
             game.age += (now - self.last_tick).as_secs_f32().min(0.1) * 60.0;
             if game.age > length {
@@ -1354,6 +1386,31 @@ impl App {
         }
     }
 
+    /// Up and down walk the effect list (shift picks a range in a project), left and right step the preview a frame.
+    /// Left to the focused widget while text is being typed.
+    fn arrow_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || self.doc.is_none() {
+            return;
+        }
+        use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
+        let (moves, frames, shift) = ctx.input_mut(|i| {
+            let count = |i: &egui::InputState, key| i.events.iter().filter(|e| matches!(e, egui::Event::Key { key: k, pressed: true, .. } if *k == key)).count() as i32;
+            let moves = count(i, ArrowDown) - count(i, ArrowUp);
+            let frames = count(i, ArrowRight) - count(i, ArrowLeft);
+            // taken, so a focused button doesn't also move focus with them
+            i.events.retain(|e| !matches!(e, egui::Event::Key { key: ArrowDown | ArrowUp | ArrowLeft | ArrowRight, .. }));
+            (moves, frames, i.modifiers.shift)
+        });
+        if moves != 0 {
+            self.nav = (self.nav.0 + moves, shift);
+            ctx.request_repaint();
+        }
+        if frames != 0 {
+            self.frame_step += frames;
+            ctx.request_repaint();
+        }
+    }
+
     /// Save once the file has been left alone for a moment.
     fn auto_save(&mut self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
@@ -1425,6 +1482,7 @@ impl eframe::App for App {
         if self.busy.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        self.arrow_keys(&ctx);
         self.auto_save(&ctx);
         self.walk(&ctx);
         self.take_shot(&ctx);
@@ -1436,6 +1494,19 @@ impl eframe::App for App {
     }
 }
 
+/// The effect `by` places from `current` in `order`, kept within it: the first or last when none is current.
+fn step(order: &[String], current: Option<&str>, by: i32) -> Option<String> {
+    if by == 0 || order.is_empty() {
+        return None;
+    }
+    let at = match current.and_then(|c| order.iter().position(|n| n == c)) {
+        Some(at) => (at as i32 + by).clamp(0, order.len() as i32 - 1) as usize,
+        None if by > 0 => 0,
+        None => order.len() - 1,
+    };
+    (Some(order[at].as_str()) != current).then(|| order[at].clone())
+}
+
 /// One effect in a project's list: click to show it (ctrl-click adds it to the picked ones, shift-click picks a
 /// range), drag it, with the others picked, onto a folder, or right-click to move them.
 fn effect_item(ui: &mut egui::Ui, name: &str, set: usize, in_folder: Option<usize>, items: &mut ListItems) {
@@ -1443,6 +1514,9 @@ fn effect_item(ui: &mut egui::Ui, name: &str, set: usize, in_folder: Option<usiz
     let picked = items.chosen.iter().any(|c| c == name);
     let on = picked || items.current.as_deref() == Some(name);
     let response = ui.selectable_label(on, name).interact(Sense::drag());
+    if items.reveal && items.current.as_deref() == Some(name) {
+        response.scroll_to_me(None);
+    }
     // the effects that go with it: every picked one when it is picked, else just it
     let moving = if picked { items.chosen.to_vec() } else { vec![name.to_string()] };
     response.dnd_set_drag_payload(moving.clone());
@@ -1484,4 +1558,23 @@ fn drop_zone(ui: &mut egui::Ui, dragging: bool, add: impl FnOnce(&mut egui::Ui))
         return egui::DragAndDrop::take_payload::<Vec<String>>(ui.ctx());
     }
     None
+}
+
+#[cfg(test)]
+mod arrow_tests {
+    use super::step;
+
+    #[test]
+    fn arrows_walk_the_list() {
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(step(&order, Some("a"), 1).as_deref(), Some("b"));
+        assert_eq!(step(&order, Some("b"), -1).as_deref(), Some("a"));
+        assert_eq!(step(&order, Some("c"), 1), None, "stays at the end");
+        assert_eq!(step(&order, Some("a"), -1), None, "stays at the start");
+        assert_eq!(step(&order, Some("a"), 5).as_deref(), Some("c"));
+        assert_eq!(step(&order, None, 1).as_deref(), Some("a"));
+        assert_eq!(step(&order, Some("gone"), -1).as_deref(), Some("c"));
+        assert_eq!(step(&order, Some("b"), 0), None);
+        assert_eq!(step(&[], None, 1), None);
+    }
 }

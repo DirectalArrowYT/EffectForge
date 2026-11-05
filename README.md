@@ -11,6 +11,9 @@ mod** on the top bar. The first save keeps a `.forge-backup` beside the file.
 seconds after the last change. Outside a project that writes the opened `.eff` itself. Both are kept in
 `forge_data/settings.json`.
 
+Arrow keys: **Up/Down** move through the effect list (with **Shift** in a project they pick a run, as shift-click
+does), **Left/Right** pause the preview and step it a frame. They leave text boxes alone while you type.
+
 Saved edits live in the `.eff` only: running `bake_slotted.py` rebuilds that file and loses them, unless the effect is
 kept as tuned.
 
