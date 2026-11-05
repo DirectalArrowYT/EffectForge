@@ -34,7 +34,8 @@ anywhere (the project remembers it). The first export keeps a `.forge-backup` of
 `.forge` too.
 
 In a project the effect list is sorted into folders: name one and **New folder**, then drag effects onto a folder (or
-right-click one: **Move to**). Right-click a folder to rename or remove it; removing a folder keeps its effects. Tick a
+right-click one: **Move to**). Ctrl-click picks more than one and shift-click picks a run of them; dragging or moving
+any picked effect takes them all. Right-click a folder to rename or remove it; removing a folder keeps its effects. Tick a
 folder to skip it on export: the tick adds `UNUSED_` to its name, and every folder named `UNUSED_...` is left out. A
 skipped effect keeps its name in the exported file but plays nothing, and whatever only it used is dropped.
 

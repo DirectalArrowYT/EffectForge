@@ -119,12 +119,27 @@ pub struct App {
     folder_name: String,
     /// A folder being renamed and the name typed so far.
     folder_edit: Option<(usize, String)>,
+    /// Effects picked together in a project's list (ctrl- and shift-click), to drag or move at once.
+    chosen: Vec<String>,
+    /// Where a shift-click range starts.
+    anchor: Option<String>,
+}
+
+/// What every effect in a project's list draws with.
+struct ListItems<'a> {
+    chosen: &'a [String],
+    current: Option<String>,
+    folders: Vec<String>,
+    actions: Vec<ListAction>,
+    /// Names in the order drawn, for shift-click ranges.
+    drawn: Vec<String>,
 }
 
 /// What the list was asked to do, done once it is drawn.
 enum ListAction {
-    Pick(String, usize),
-    Move(String, Option<usize>),
+    /// Clicked, with the keys held.
+    Pick(String, usize, egui::Modifiers),
+    Move(Vec<String>, Option<usize>),
     Skip(usize, bool),
     RenameFolder(usize, String),
     RemoveFolder(usize),
@@ -162,6 +177,7 @@ impl App {
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
             project: None, renaming: None, rename_to: String::new(), folder_name: String::new(), folder_edit: None,
+            chosen: Vec::new(), anchor: None,
         };
         app.select = select;
         if let Some(path) = open {
@@ -217,11 +233,15 @@ impl App {
                         self.emitter = 0;
                     }
                     if let Some((old, new)) = self.renaming.take() {
+                        self.chosen.clear();
+                        self.anchor = None;
                         if let Some(project) = &mut self.project {
                             project.rename_effect(&old, &new);
                         }
                     }
                     if note == "Opened" {
+                        self.chosen.clear();
+                        self.anchor = None;
                         self.project = project::project_of_eff(&doc.path).filter(|p| p.exists()).and_then(|p| Project::load(&p).ok());
                         if let Some(project) = &mut self.project {
                             let names: Vec<String> = doc.effects().into_iter().map(|(n, _)| n).collect();
@@ -528,11 +548,16 @@ impl App {
                 }
             }
         });
-        let folder_names: Vec<String> = project.folders.iter().map(|f| f.name.clone()).collect();
-        let current = self.effect.as_ref().map(|e| e.0.clone());
         let shown = |name: &String| name.to_lowercase().contains(filter);
-        let dragging = egui::DragAndDrop::has_payload_of_type::<String>(ui.ctx());
-        let mut actions = Vec::new();
+        let dragging = egui::DragAndDrop::has_payload_of_type::<Vec<String>>(ui.ctx());
+        let chosen = self.chosen.clone();
+        let mut items = ListItems {
+            chosen: &chosen,
+            current: self.effect.as_ref().map(|e| e.0.clone()),
+            folders: project.folders.iter().map(|f| f.name.clone()).collect(),
+            actions: Vec::new(),
+            drawn: Vec::new(),
+        };
         let folder_edit = &mut self.folder_edit;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, folder) in project.folders.iter().enumerate() {
@@ -543,14 +568,14 @@ impl App {
                         .show_header(ui, |ui| {
                             let mut skip = folder.is_unused();
                             if ui.checkbox(&mut skip, "").on_hover_text("Skip on export: leaves this folder's effects out of the exported file. Adds UNUSED_ to the name.").changed() {
-                                actions.push(ListAction::Skip(i, skip));
+                                items.actions.push(ListAction::Skip(i, skip));
                             }
                             match folder_edit {
                                 Some((at, text)) if *at == i => {
                                     let edit = ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
                                     if edit.lost_focus() {
                                         if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                                            actions.push(ListAction::RenameFolder(i, text.clone()));
+                                            items.actions.push(ListAction::RenameFolder(i, text.clone()));
                                         }
                                         *folder_edit = None;
                                     } else {
@@ -570,7 +595,7 @@ impl App {
                                             ui.close();
                                         }
                                         if ui.button("Remove folder").on_hover_text("Its effects go back to no folder; none are deleted.").clicked() {
-                                            actions.push(ListAction::RemoveFolder(i));
+                                            items.actions.push(ListAction::RemoveFolder(i));
                                             ui.close();
                                         }
                                     });
@@ -579,12 +604,12 @@ impl App {
                         })
                         .body(|ui| {
                             for (name, set) in effects.iter().filter(|(n, _)| shown(n)) {
-                                effect_item(ui, name, *set, current.as_deref() == Some(name.as_str()), &folder_names, Some(i), &mut actions);
+                                effect_item(ui, name, *set, Some(i), &mut items);
                             }
                         });
                 });
-                if let Some(name) = dropped {
-                    actions.push(ListAction::Move((*name).clone(), Some(i)));
+                if let Some(names) = dropped {
+                    items.actions.push(ListAction::Move((*names).clone(), Some(i)));
                 }
             }
             let loose: Vec<&(String, usize)> = list.iter().filter(|(n, _)| project.folder_of(n).is_none()).collect();
@@ -593,19 +618,40 @@ impl App {
                     ui.label(egui::RichText::new(format!("Not in a folder ({})", loose.len())).strong());
                 }
                 for (name, set) in loose.iter().filter(|(n, _)| shown(n)) {
-                    effect_item(ui, name, *set, current.as_deref() == Some(name.as_str()), &folder_names, None, &mut actions);
+                    effect_item(ui, name, *set, None, &mut items);
                 }
                 if dragging {
                     ui.weak("Drop here to take it out of its folder");
                 }
             });
-            if let Some(name) = dropped {
-                actions.push(ListAction::Move((*name).clone(), None));
+            if let Some(names) = dropped {
+                items.actions.push(ListAction::Move((*names).clone(), None));
             }
         });
+        let ListItems { actions, drawn, .. } = items;
         for action in actions {
             match action {
-                ListAction::Pick(name, set) => {
+                ListAction::Pick(name, set, keys) => {
+                    let range = |a: &str, b: &str| {
+                        let at = |n: &str| drawn.iter().position(|d| d == n);
+                        let (Some(a), Some(b)) = (at(a), at(b)) else { return vec![b.to_string()] };
+                        drawn[a.min(b)..=a.max(b)].to_vec()
+                    };
+                    if keys.shift {
+                        let anchor = self.anchor.clone().unwrap_or_else(|| name.clone());
+                        self.chosen = range(&anchor, &name);
+                        self.anchor = Some(anchor);
+                    } else if keys.command {
+                        if let Some(at) = self.chosen.iter().position(|c| *c == name) {
+                            self.chosen.remove(at);
+                        } else {
+                            self.chosen.push(name.clone());
+                        }
+                        self.anchor = Some(name.clone());
+                    } else {
+                        self.chosen = vec![name.clone()];
+                        self.anchor = Some(name.clone());
+                    }
                     self.effect = Some((name, set));
                     self.emitter = 0;
                     self.preview = None;
@@ -613,8 +659,10 @@ impl App {
                 other => {
                     let Some(project) = &mut self.project else { continue };
                     let result = match other {
-                        ListAction::Move(name, to) => {
-                            project.move_to(&name, to);
+                        ListAction::Move(names, to) => {
+                            for name in &names {
+                                project.move_to(name, to);
+                            }
                             Ok(())
                         }
                         ListAction::Skip(i, skip) => project.set_skipped(i, skip),
@@ -1261,40 +1309,52 @@ impl eframe::App for App {
     }
 }
 
-/// One effect in a project's list: click to show it, drag it onto a folder, or right-click to move it.
-fn effect_item(ui: &mut egui::Ui, name: &str, set: usize, on: bool, folders: &[String], in_folder: Option<usize>, actions: &mut Vec<ListAction>) {
+/// One effect in a project's list: click to show it (ctrl-click adds it to the picked ones, shift-click picks a
+/// range), drag it, with the others picked, onto a folder, or right-click to move them.
+fn effect_item(ui: &mut egui::Ui, name: &str, set: usize, in_folder: Option<usize>, items: &mut ListItems) {
+    items.drawn.push(name.to_string());
+    let picked = items.chosen.iter().any(|c| c == name);
+    let on = picked || items.current.as_deref() == Some(name);
     let response = ui.selectable_label(on, name).interact(Sense::drag());
-    response.dnd_set_drag_payload(name.to_string());
+    // the effects that go with it: every picked one when it is picked, else just it
+    let moving = if picked { items.chosen.to_vec() } else { vec![name.to_string()] };
+    response.dnd_set_drag_payload(moving.clone());
     if response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if moving.len() > 1 {
+            response.show_tooltip_text(format!("{} effects", moving.len()));
+        }
     }
     if response.clicked() {
-        actions.push(ListAction::Pick(name.to_string(), set));
+        let keys = ui.input(|i| i.modifiers);
+        items.actions.push(ListAction::Pick(name.to_string(), set, keys));
     }
+    let actions = &mut items.actions;
+    let folders = &items.folders;
     response.context_menu(|ui| {
-        ui.label("Move to");
+        ui.label(if moving.len() > 1 { format!("Move {} effects to", moving.len()) } else { "Move to".to_string() });
         for (i, folder) in folders.iter().enumerate() {
-            if Some(i) != in_folder && ui.button(folder).clicked() {
-                actions.push(ListAction::Move(name.to_string(), Some(i)));
+            if (moving.len() > 1 || Some(i) != in_folder) && ui.button(folder).clicked() {
+                actions.push(ListAction::Move(moving.clone(), Some(i)));
                 ui.close();
             }
         }
-        if in_folder.is_some() && ui.button("No folder").clicked() {
-            actions.push(ListAction::Move(name.to_string(), None));
+        if (moving.len() > 1 || in_folder.is_some()) && ui.button("No folder").clicked() {
+            actions.push(ListAction::Move(moving.clone(), None));
             ui.close();
         }
     });
 }
 
 /// `add` drawn as a place to drop a dragged effect: outlined while one is over it. The effect dropped, if one was.
-fn drop_zone(ui: &mut egui::Ui, dragging: bool, add: impl FnOnce(&mut egui::Ui)) -> Option<Arc<String>> {
+fn drop_zone(ui: &mut egui::Ui, dragging: bool, add: impl FnOnce(&mut egui::Ui)) -> Option<Arc<Vec<String>>> {
     let rect = ui.scope(add).response.rect;
     if !dragging || !ui.rect_contains_pointer(rect) {
         return None;
     }
     ui.painter().rect_stroke(rect.expand(1.0), 3.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
     if ui.input(|i| i.pointer.any_released()) {
-        return egui::DragAndDrop::take_payload::<String>(ui.ctx());
+        return egui::DragAndDrop::take_payload::<Vec<String>>(ui.ctx());
     }
     None
 }
