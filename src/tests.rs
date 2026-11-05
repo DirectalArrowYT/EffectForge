@@ -152,14 +152,81 @@ fn spawns_are_unchanged() {
 }
 const SPAWNS: u64 = 0xffeeb80362f78a05;
 
-/// Every shader variation of a fighter's file translates.
+/// What the translator makes of one file's shaders, as text: per variation and stage, its bindings and WGSL, and
+/// the stages it could not translate.
+fn shader_digest(eff: &[u8]) -> (crate::draw::shaders::Library, String) {
+    use crate::draw::mx::wgsl::Stage;
+    let library = crate::draw::shaders::Library::translate(eff).unwrap();
+    let mut variations: Vec<u32> = library.vertex.keys().chain(library.fragment.keys()).copied().collect();
+    variations.sort();
+    variations.dedup();
+    let mut text = format!("tried {}
+", library.tried);
+    for v in variations {
+        for stage in [Stage::Vertex, Stage::Fragment] {
+            match library.program(v, stage) {
+                Some(p) => text += &format!(
+                    "v{v} {stage:?} cbufs {:#x} in {:#x} units {:?} c1 {:016x} attributes {:?}
+{}
+",
+                    p.cbufs, p.inputs, p.units, fnv(&p.constants), p.attributes, p.wgsl
+                ),
+                None => text += &format!("v{v} {stage:?} not translated
+"),
+            }
+        }
+    }
+    (library, text)
+}
+
+/// Every shader variation of a fighter's file and of the common file translates, and to the same WGSL as when the
+/// translator was taken in.
 #[test]
-fn every_pit_shader_translates() {
-    let Some(path) = pit() else { return };
-    let library = crate::draw::shaders::Library::translate(&std::fs::read(&path).unwrap()).unwrap();
-    println!("{} of {} stages translated", library.translated(), library.tried);
-    assert!(library.tried > 0);
-    assert_eq!(library.translated(), library.tried);
+fn shaders_translate_the_same() {
+    let (Some(fighter), Some(shared)) = (pit(), common()) else { return };
+    let mut all = String::new();
+    for (path, complete) in [(fighter, true), (shared, false)] {
+        let (library, text) = shader_digest(&std::fs::read(&path).unwrap());
+        println!("{}: {} of {} stages translated", path.display(), library.translated(), library.tried);
+        assert!(library.tried > 0);
+        assert!(!complete || library.translated() == library.tried);
+        all += &text;
+    }
+    assert_eq!(fnv(all.as_bytes()), SHADERS);
+}
+const SHADERS: u64 = 0x62fa264239432958;
+
+/// Opt in with `FORGE_TEST_SHADER_DIR` (a folder searched for .eff files) and `FORGE_TEST_SHADER_OUT` (a file):
+/// writes one line per file, its path and the hash of its [`shader_digest`], to compare against an older build.
+#[test]
+fn shader_corpus() {
+    let (Ok(dir), Ok(out)) = (std::env::var("FORGE_TEST_SHADER_DIR"), std::env::var("FORGE_TEST_SHADER_OUT")) else { return };
+    fn walk(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.extension().is_some_and(|e| e == "eff") {
+                found.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new(&dir), &mut files);
+    files.sort();
+    let lines: Vec<String> = files
+        .iter()
+        .map(|path| {
+            let eff = std::fs::read(path).unwrap();
+            let digest = std::panic::catch_unwind(|| shader_digest(&eff).1).map_or_else(|_| "panicked".to_string(), |t| format!("{:016x}", fnv(t.as_bytes())));
+            format!("{} {digest}", path.display())
+        })
+        .collect();
+    std::fs::write(&out, lines.join("
+") + "
+").unwrap();
+    println!("{} files", lines.len());
 }
 
 /// Every field a recipe sets is a real field, and every recipe sets something.
