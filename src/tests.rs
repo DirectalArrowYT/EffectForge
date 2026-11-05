@@ -222,3 +222,103 @@ fn blocks_are_unchanged() {
     }
 }
 const BLOCKS: u64 = 0x78b5d9d39362d018;
+
+/// What the texture module reads out of every pool texture in ef_pit and ef_common, pinned by a hash.
+#[test]
+fn textures_read_the_same() {
+    use crate::eff::textures::{decode_for_sampling, decode_preview, describe, Form};
+    let files: Vec<PathBuf> = [pit(), common()].into_iter().flatten().collect();
+    if files.is_empty() {
+        return;
+    }
+    let mut text = Vec::new();
+    let mut count = 0;
+    for path in &files {
+        let doc = open(path);
+        let pool = doc.loaded.texture_pool.clone().unwrap_or_default();
+        for (i, t) in doc.loaded.ptcl.bntx_textures.iter().enumerate() {
+            let d = describe(&pool, i, &t.tex_name).ok();
+            text.extend(format!("{} {:?}\n", t.tex_name, d.as_ref().map(|d| (d.width, d.height, d.mipmaps, &d.format, d.convertible))).bytes());
+            match decode_for_sampling(&pool, i, &t.tex_name) {
+                Ok(s) => {
+                    text.push(s.srgb as u8);
+                    for level in &s.levels {
+                        text.extend(format!("{}x{}", level.width(), level.height()).bytes());
+                        text.extend(level.as_raw());
+                    }
+                }
+                Err(_) => text.extend(b"no sampling"),
+            }
+            for (form, edge) in [(Form::Raw, None), (Form::Editable, Some(64))] {
+                match decode_preview(&pool, i, &t.tex_name, form, edge) {
+                    Ok(image) => {
+                        text.extend(format!("{}x{}", image.width(), image.height()).bytes());
+                        text.extend(image.as_raw());
+                    }
+                    Err(_) => text.extend(b"no preview"),
+                }
+            }
+            count += 1;
+        }
+    }
+    println!("{count} textures, hash {:#x}", fnv(&text));
+    assert!(count > 100);
+    assert_eq!(fnv(&text), TEXTURES_READ);
+}
+const TEXTURES_READ: u64 = 0xab28207941b082e3;
+
+/// Replacing, adding, copying and removing pool textures in ef_pit: one small texture of each format, through an
+/// edited picture of itself in both forms. The rebuilt pools and what each import reports, pinned by a hash.
+#[test]
+fn texture_edits_give_the_same_pool() {
+    use crate::eff::textures::*;
+    let Some(path) = pit() else { return };
+    let doc = open(&path);
+    let pool = doc.loaded.texture_pool.clone().unwrap();
+    let names: Vec<String> = doc.loaded.ptcl.bntx_textures.iter().map(|t| t.tex_name.clone()).collect();
+    let mut seen = Vec::new();
+    let mut text = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let Ok(d) = describe(&pool, i, name) else { continue };
+        if seen.contains(&d.format) || d.width * d.height > 128 * 128 {
+            continue;
+        }
+        seen.push(d.format.clone());
+        text.extend(format!("{name} {}\n", d.format).bytes());
+        for form in [Form::Editable, Form::Raw] {
+            let png = decode_preview(&pool, i, name, form, None).ok().map(|mut image| {
+                // Paint the top-left quarter black and see-through, the way an edit would.
+                for (x, y, px) in image.enumerate_pixels_mut() {
+                    if x < d.width / 2 && y < d.height / 2 {
+                        *px = image::Rgba([0, 0, 0, 0]);
+                    }
+                }
+                let mut out = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut out, image::ImageFormat::Png).unwrap();
+                out.into_inner()
+            });
+            let Some(png) = png else {
+                text.extend(b"no picture\n");
+                continue;
+            };
+            for result in [replace_with_png(&pool, &names, i, &png, form), add_texture_from_png(&pool, &names, i, "forge_new", &png, form)] {
+                match result {
+                    Ok((rebuilt, report)) => {
+                        text.extend(format!("{} {:?} {:#x}\n", report.format, report.format_substituted_from, fnv(&rebuilt)).bytes())
+                    }
+                    Err(_) => text.extend(b"failed\n"),
+                }
+            }
+        }
+        text.extend(format!("{:?}\n", duplicate_texture(&pool, &names, i, "forge_copy").map(|p| fnv(&p)).ok()).bytes());
+        text.extend(format!("{:?}\n", remove_texture(&pool, &names, i).map(|p| fnv(&p)).ok()).bytes());
+    }
+    text.extend(format!("{:?}\n", duplicate_texture(&pool, &names, 0, &names[1]).is_err()).bytes());
+    text.extend(format!("{} {}\n", unique_texture_name(&names, "forge_a"), unique_texture_name(&["forge_a_v2".into()], "forge_a_v2")).bytes());
+    text.extend(format!("{:#x} {:#x}\n", unused_descriptor_id(&[], "forge_a"), unused_descriptor_id(&[unused_descriptor_id(&[], "x")], "x")).bytes());
+    println!("{}", String::from_utf8_lossy(&text));
+    println!("{} formats, hash {:#x}", seen.len(), fnv(&text));
+    assert!(seen.len() > 1);
+    assert_eq!(fnv(&text), TEXTURE_EDITS);
+}
+const TEXTURE_EDITS: u64 = 0x1fb77a886849b645;
