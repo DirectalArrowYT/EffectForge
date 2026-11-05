@@ -8,6 +8,7 @@ mod engine;
 mod log;
 mod preview;
 mod project;
+mod settings;
 mod stage;
 #[cfg(test)]
 mod tests;

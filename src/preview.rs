@@ -54,6 +54,8 @@ pub struct Preview {
     views: HashMap<TextureKey, wgpu::TextureView>,
     pub age: f32,
     pub playing: bool,
+    /// What the view clears to, RGB.
+    pub backdrop: [f64; 3],
     pub orbit: egui::Vec2,
     /// Draw only this layer.
     pub solo: Option<usize>,
@@ -73,7 +75,7 @@ impl Preview {
         Self {
             render, target: None, renderer: None, meshes: HashMap::new(), pixels: HashMap::new(),
             views: HashMap::new(), age: 0.0, playing: true, orbit: egui::Vec2::ZERO, solo: None, half_view: HALF_VIEW,
-            outline: None, swing: false, outline_pipeline: None,
+            outline: None, swing: false, outline_pipeline: None, backdrop: [0.013, 0.012, 0.024],
         }
     }
 
@@ -287,6 +289,7 @@ impl Preview {
         }
         let outline = self.outline.filter(|layer| prepared.iter().any(|(index, _)| index == layer));
         self.outline_pipeline();
+        let [r, g, b] = self.backdrop;
         let target = self.target(size);
         let id = target.id;
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -298,7 +301,7 @@ impl Preview {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.013, g: 0.012, b: 0.024, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

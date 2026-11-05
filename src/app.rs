@@ -16,6 +16,7 @@ use crate::eff::model::EmitterDef;
 use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned};
 use crate::preview::Preview as GamePreview;
 use crate::project::{self, Project};
+use crate::settings::{Settings, Theme};
 
 enum Job {
     Open(PathBuf),
@@ -123,7 +124,15 @@ pub struct App {
     chosen: Vec<String>,
     /// Where a shift-click range starts.
     anchor: Option<String>,
+    settings: Settings,
+    /// Since when the file has had changes not saved, counted from the last edit.
+    unsaved_since: Option<std::time::Instant>,
+    /// The save running was started by auto save.
+    auto_saving: bool,
 }
+
+/// Auto save waits this long after the last change.
+const AUTO_SAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// What every effect in a project's list draws with.
 struct ListItems<'a> {
@@ -178,7 +187,12 @@ impl App {
             tuned: None, only_tuned: false, borrowed: Default::default(),
             project: None, renaming: None, rename_to: String::new(), folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None,
+            settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
+        app.settings.theme.apply(&cc.egui_ctx);
+        if let Some(game) = &mut app.game {
+            game.backdrop = app.settings.theme.backdrop();
+        }
         app.select = select;
         if let Some(path) = open {
             app.run(Job::Open(path), "Opening");
@@ -277,10 +291,11 @@ impl App {
                 Done::Saved(Ok(path)) => {
                     self.busy = None;
                     self.unsaved = false;
-                    self.status = format!("Saved {}", path.display());
+                    let how = if std::mem::take(&mut self.auto_saving) { "Auto saved" } else { "Saved" };
+                    self.status = format!("{how} {}", path.display());
                     if let Some(project) = &self.project {
                         match project.save() {
-                            Ok(()) => self.status = format!("Saved {}", project.path.display()),
+                            Ok(()) => self.status = format!("{how} {}", project.path.display()),
                             Err(e) => self.status = format!("Saved the effects, but not the folders: {e:#}"),
                         }
                     }
@@ -296,6 +311,10 @@ impl App {
                 }
                 Done::Saved(Err(e)) => {
                     self.busy = None;
+                    // a failing save would otherwise be retried every few seconds
+                    if std::mem::take(&mut self.auto_saving) {
+                        self.settings.auto_save = false;
+                    }
                     self.status = format!("Save failed: {e:#}");
                 }
                 Done::Tuned(Ok(tuned), note) => {
@@ -389,8 +408,8 @@ impl App {
         self.run(Job::Open(path), "Opening");
     }
 
-    /// The project buttons: start one from the open file, or save and export the open one.
-    fn project_buttons(&mut self, ui: &mut egui::Ui, ready: bool) {
+    /// The project items of the File menu: start one from the open file, or export the open one.
+    fn project_items(&mut self, ui: &mut egui::Ui, ready: bool) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(project) = self.project.clone() else {
             if ui.add_enabled(ready, egui::Button::new("New project…"))
@@ -418,17 +437,14 @@ impl App {
             }
             return;
         };
-        let left_out = project.left_out();
-        let skipping = if left_out.is_empty() { String::new() } else { format!(" Skips {} effects in folders marked to skip.", left_out.len()) };
         if let Some(to) = project.export_to.clone() {
             let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if ui.add_enabled(ready, egui::Button::new(format!("Export to {name}")))
-                .on_hover_text(format!("Writes {}. The first export keeps a .forge-backup of what was there.{skipping}", to.display()))
-                .clicked()
-            {
-                self.run(Job::Export(left_out.clone(), to), "Exporting");
+            if ui.add_enabled(ready, egui::Button::new(format!("Export to {name}"))).on_hover_text(self.export_hint(&to)).clicked() {
+                self.export(to);
             }
         }
+        let left_out = project.left_out();
+        let skipping = if left_out.is_empty() { String::new() } else { format!(" Skips {} effects in folders marked to skip.", left_out.len()) };
         if ui.add_enabled(ready, egui::Button::new("Export to…")).on_hover_text(format!("Pick where to export; the project remembers it.{skipping}")).clicked() {
             let mut dialog = rfd::FileDialog::new().add_filter("Effect file", &["eff"]);
             if let Some(to) = &project.export_to {
@@ -452,41 +468,116 @@ impl App {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             let idle = self.busy.is_none();
-            if ui.add_enabled(idle, egui::Button::new("Open")).on_hover_text("An .eff, or a project (.forge).").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Effect file or project", &["eff", project::EXTENSION]).pick_file() {
-                    self.open(path);
-                }
-            }
-            let recent = self.recent.clone();
-            ui.add_enabled_ui(idle && !recent.is_empty(), |ui| {
-                ui.menu_button("Recent", |ui| {
-                    for path in recent {
-                        if ui.button(path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()).on_hover_text(path.display().to_string()).clicked() {
-                            self.open(path);
-                        }
-                    }
-                });
-            });
-            let waiting = !self.pending.is_empty();
-            let (save, save_hint) = if self.project.is_some() {
-                ("Save project", "Saves the project: its effects and folders. Export puts them in the mod.")
-            } else {
-                ("Save to mod", "Writes the .eff you opened. The first save keeps a .forge-backup beside it.")
-            };
-            if ui.add_enabled(idle && self.doc.is_some() && self.unsaved && !waiting, egui::Button::new(save)).on_hover_text(save_hint).clicked() {
+            let waiting = !self.pending.is_empty() || !self.applying.is_empty();
+            ui.menu_button("File", |ui| self.file_menu(ui, idle, waiting));
+            ui.menu_button("Options", |ui| self.options_menu(ui));
+            ui.separator();
+            // the two things done most, one click away
+            let can_save = idle && self.doc.is_some() && self.unsaved && !waiting;
+            let save = if self.project.is_some() { "Save project" } else { "Save to mod" };
+            if ui.add_enabled(can_save, egui::Button::new(save)).on_hover_text(self.save_hint()).clicked() {
                 self.run(Job::Save, "Saving");
             }
-            self.project_buttons(ui, idle && !waiting && self.applying.is_empty());
+            if let Some(to) = self.project.as_ref().and_then(|p| p.export_to.clone()) {
+                let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if ui.add_enabled(idle && !waiting, egui::Button::new(format!("Export to {name}"))).on_hover_text(self.export_hint(&to)).clicked() {
+                    self.export(to);
+                }
+            }
             ui.separator();
             if let Some(busy) = &self.busy {
                 ui.spinner();
                 ui.label(busy);
             } else {
+                if self.unsaved {
+                    let note = if self.settings.auto_save { "\u{25CF} saving soon" } else { "\u{25CF} unsaved" };
+                    ui.colored_label(ui.visuals().warn_fg_color, note);
+                }
                 ui.label(&self.status);
             }
         });
+    }
+
+    fn save_hint(&self) -> &'static str {
+        if self.project.is_some() {
+            "Saves the project: its effects and folders. Export puts them in the mod."
+        } else {
+            "Writes the .eff you opened. The first save keeps a .forge-backup beside it."
+        }
+    }
+
+    fn export_hint(&self, to: &Path) -> String {
+        let left_out = self.project.as_ref().map_or(0, |p| p.left_out().len());
+        let skipping = if left_out == 0 { String::new() } else { format!(" Skips {left_out} effects in folders marked to skip.") };
+        format!("Writes {}. The first export keeps a .forge-backup of what was there.{skipping}", to.display())
+    }
+
+    fn export(&mut self, to: PathBuf) {
+        let left_out = self.project.as_ref().map(|p| p.left_out()).unwrap_or_default();
+        self.run(Job::Export(left_out, to), "Exporting");
+    }
+
+    fn file_menu(&mut self, ui: &mut egui::Ui, idle: bool, waiting: bool) {
+        if ui.add_enabled(idle, egui::Button::new("Open…")).on_hover_text("An .eff, or a project (.forge).").clicked() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Effect file or project", &["eff", project::EXTENSION]).pick_file() {
+                self.open(path);
+            }
+        }
+        let recent = self.recent.clone();
+        ui.add_enabled_ui(idle && !recent.is_empty(), |ui| {
+            ui.menu_button("Open recent", |ui| {
+                for path in recent {
+                    if ui.button(path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()).on_hover_text(path.display().to_string()).clicked() {
+                        self.open(path);
+                    }
+                }
+            });
+        });
+        ui.separator();
+        let can_save = idle && self.doc.is_some() && self.unsaved && !waiting;
+        let save = if self.project.is_some() { "Save project" } else { "Save to mod" };
+        if ui.add_enabled(can_save, egui::Button::new(save)).on_hover_text(self.save_hint()).clicked() {
+            self.run(Job::Save, "Saving");
+        }
+        ui.separator();
+        self.project_items(ui, idle && !waiting);
+        ui.separator();
+        let root = crate::engine::game_root();
+        let hint = match &root {
+            Some(root) => format!("The starter kit reads from {}.", root.display()),
+            None => "The dumped game folder that holds the effect folder; the starter kit reads from it.".to_string(),
+        };
+        if ui.button("Game files folder…").on_hover_text(hint).clicked() {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                match set_game_root(&dir) {
+                    Ok(root) => self.status = format!("Kit reads from {}", root.display()),
+                    Err(e) => self.status = format!("{e:#}"),
+                }
+            }
+        }
+    }
+
+    fn options_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Theme", |ui| {
+            for theme in Theme::ALL {
+                if ui.radio(self.settings.theme == theme, theme.name()).clicked() {
+                    self.settings.theme = theme;
+                    theme.apply(ui.ctx());
+                    if let Some(game) = &mut self.game {
+                        game.backdrop = theme.backdrop();
+                    }
+                    self.settings.save();
+                }
+            }
+        });
+        if ui.checkbox(&mut self.settings.auto_save, "Auto save")
+            .on_hover_text("Saves a few seconds after your last change. Outside a project that writes the .eff you opened.")
+            .changed()
+        {
+            self.settings.save();
+        }
     }
 
     fn effect_list(&mut self, ui: &mut egui::Ui) {
@@ -1252,6 +1343,29 @@ impl App {
         }
     }
 
+    /// Save once the file has been left alone for a moment.
+    fn auto_save(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let editing = self.busy.is_some() || !self.pending.is_empty() || !self.applying.is_empty() || ctx.input(|i| i.pointer.any_down());
+        if !self.unsaved || self.doc.is_none() {
+            self.unsaved_since = None;
+            return;
+        }
+        if editing || self.unsaved_since.is_none() {
+            self.unsaved_since = Some(now);
+        }
+        if !self.settings.auto_save || self.shot.is_some() {
+            return;
+        }
+        let since = self.unsaved_since.unwrap_or(now);
+        if !editing && now.duration_since(since) >= AUTO_SAVE_AFTER {
+            self.auto_saving = true;
+            self.run(Job::Save, "Auto saving");
+        } else {
+            ctx.request_repaint_after(AUTO_SAVE_AFTER);
+        }
+    }
+
     /// `shot`: save the window's own frame to a file, then close. Needs neither focus nor the desktop.
     fn take_shot(&mut self, ctx: &egui::Context) {
         let Some(shot) = self.shot.as_mut() else { return };
@@ -1299,6 +1413,7 @@ impl eframe::App for App {
         if self.busy.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        self.auto_save(&ctx);
         self.walk(&ctx);
         self.take_shot(&ctx);
         self.load_preview(&ctx);

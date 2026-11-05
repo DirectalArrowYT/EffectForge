@@ -4,8 +4,12 @@ Make and edit Smash Ultimate effects without touching scripts.
 
     target/release/effect_forge.exe [file.eff] [EFFECT_NAME]
 
-Open an `.eff`, pick an effect and a layer, change values (they apply as you let go), then **Save to mod**.
-The first save keeps a `.forge-backup` beside the file.
+**File > Open…** an `.eff`, pick an effect and a layer, change values (they apply as you let go), then **Save to
+mod** on the top bar. The first save keeps a `.forge-backup` beside the file.
+
+**Options** has the theme (Dark, or Ember: purple with orange) and **Auto save**, on by default, which saves a few
+seconds after the last change. Outside a project that writes the opened `.eff` itself. Both are kept in
+`forge_data/settings.json`.
 
 Saved edits live in the `.eff` only: running `bake_slotted.py` rebuilds that file and loses them, unless the effect is
 kept as tuned.
@@ -18,7 +22,7 @@ model and shader, so it draws in game exactly as it does in Smash. **Add layer**
 the kit (a name the effect already has gets `_2`), **Remove layer** takes the selected one out with any under it. Then
 shape each layer with the panel and **Save to mod**.
 
-The kit is read from the game's own effect files: the first time, the menu asks for the dumped game folder that holds
+The kit is read from the game's own effect files: the first time, the menu asks for the dumped game folder (later: **File > Game files folder…**) that holds
 the `effect` folder (or set `FORGE_GAME_ROOT`). Only what the chosen layers use comes along.
 
 A new effect is in the saved file only, so a rebuild of a generated file loses it: **Keep my tuning** on it keeps it
@@ -27,9 +31,9 @@ fighter type its spawns need. The move's script then spawns it by name; Forge do
 
 ## Projects
 
-**New project…** starts a project from the open file: `<name>.forge` (the folders and where it exports) and
+**File > New project…** starts a project from the open file: `<name>.forge` (the folders and where it exports) and
 `<name>.project.eff` beside it, a copy of the file holding every effect. Work in the project and **Save project**; the
-file in the mod is untouched until **Export**, which writes it to the file the project came from, or **Export to…**
+file in the mod is untouched until **Export**, which writes it to the file the project came from, or **File > Export to…**
 anywhere (the project remembers it). The first export keeps a `.forge-backup` of what was there. **Open** takes a
 `.forge` too.
 
