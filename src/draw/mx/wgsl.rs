@@ -19,7 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use super::decode::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     Vertex,
     Fragment,

@@ -12,7 +12,9 @@
 //!   shader's own attribute names (its reflection).
 //! * blend / depth / cull: [`draw_state`], from render_state.
 
-use crate::draw::gpu::{DrawState, Reflection, VertexInput};
+use crate::draw::gpu::{DrawState, VertexInput};
+use crate::draw::mx::wgsl::Stage;
+use crate::draw::shaders::{Library, Program};
 
 /// The emitter's own transform within its effect (emitter_info), with and without its scale: translate, then rotate
 /// (radians, Z then Y then X, the order that fits the game's matrices best), then scale.
@@ -94,12 +96,12 @@ pub fn draw_state(emitter: &GameEmitter, prim: u32, indexed: bool) -> DrawState 
 }
 
 
-/// The particles' vertex inputs, routed by the vertex stage's reflection. `emitter_rows` are the emitter matrix's
+/// The particles' vertex inputs, routed by the vertex stage's attribute names. `emitter_rows` are the emitter matrix's
 /// rows for `sysEmtMat0..2Attr` (particles that keep the emitter's matrix from their birth).
-pub fn particle_inputs(reflection: &Reflection, spawns: &[crate::draw::sim::Spawn], emitter: glam::Mat4) -> Vec<VertexInput> {
+pub fn particle_inputs(vertex: &Program, spawns: &[crate::draw::sim::Spawn], emitter: glam::Mat4) -> Vec<VertexInput> {
     let mut out = Vec::new();
     let mut add = |name: &str, data: Vec<[f32; 4]>| {
-        if let Some(location) = reflection.input(name) {
+        if let Some(location) = vertex.attribute(name) {
             out.push(VertexInput { location, per_instance: true, data });
         }
     };
@@ -175,13 +177,13 @@ impl GameEmitter {
     }
 }
 
-/// A mesh emitter's own vertices, routed by the vertex stage's reflection: `sysPosAttr` (position, 1),
+/// A mesh emitter's own vertices, routed by the vertex stage's attribute names: `sysPosAttr` (position, 1),
 /// `sysNormalAttr`, `sysTexCoordAttr` (uv0, uv1), `sysVertexColor0Attr` (white where the primitive has none).
-pub fn mesh_inputs(reflection: &Reflection, mesh: &crate::eff::mesh_io::MeshData) -> Vec<VertexInput> {
+pub fn mesh_inputs(vertex: &Program, mesh: &crate::eff::mesh_io::MeshData) -> Vec<VertexInput> {
     let n = mesh.positions.len();
     let mut out = Vec::new();
     let mut add = |name: &str, data: Vec<[f32; 4]>| {
-        if let Some(location) = reflection.input(name) {
+        if let Some(location) = vertex.attribute(name) {
             out.push(VertexInput { location, per_instance: false, data });
         }
     };
@@ -216,7 +218,7 @@ pub struct GameDraw {
 pub struct Prepared {
     pub variation: u32,
     /// (stage, c-index, contents) for both stages: c9, c10, c13, c16.
-    pub cbufs: Vec<(u32, u32, Vec<u8>)>,
+    pub cbufs: Vec<(Stage, u32, Vec<u8>)>,
     pub vertices: Vec<VertexInput>,
     pub indices: Option<Vec<u32>>,
     pub state: DrawState,
@@ -224,26 +226,26 @@ pub struct Prepared {
     pub instances: u32,
 }
 
-/// The draw's inputs, routed through its shader's reflection. `None` when it has no particles or its shader is not in
+/// The draw's inputs, routed by its vertex stage's attribute names. `None` when it has no particles or its shader is not in
 /// the library.
-pub fn prepare(draw: &GameDraw, library: &crate::draw::gpu::ShaderLibrary) -> Option<Prepared> {
+pub fn prepare(draw: &GameDraw, library: &Library) -> Option<Prepared> {
     if draw.spawns.is_empty() {
         return None;
     }
     let variation = draw.emitter.shader_index;
-    let reflection = &library.stage(variation, crate::draw::gpu::VERTEX)?.reflection;
-    library.stage(variation, crate::draw::gpu::FRAGMENT)?;
-    let mut vertices = crate::draw::inputs::particle_inputs(reflection, &draw.spawns, draw.dynamic.matrix);
+    let vertex = library.program(variation, Stage::Vertex)?;
+    library.program(variation, Stage::Fragment)?;
+    let mut vertices = crate::draw::inputs::particle_inputs(vertex, &draw.spawns, draw.dynamic.matrix);
     let (prim, count, indices) = match &draw.mesh {
         Some(mesh) => {
-            vertices.extend(mesh_inputs(reflection, mesh));
+            vertices.extend(mesh_inputs(vertex, mesh));
             (4, mesh.indices.len() as u32, Some(mesh.indices.clone()))
         }
         None => (5, 4, None),
     };
     let custom = draw.emitter.custom.clone().unwrap_or_else(|| bytemuck::cast_slice(&RESERVED_PARAM).to_vec());
     let mut cbufs = Vec::new();
-    for stage in [crate::draw::gpu::VERTEX, crate::draw::gpu::FRAGMENT] {
+    for stage in [Stage::Vertex, Stage::Fragment] {
         cbufs.push((stage, 9, draw.emitter.block.to_vec()));
         cbufs.push((stage, 10, dynamic_block(&draw.dynamic)));
         cbufs.push((stage, 13, custom.clone()));

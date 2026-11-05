@@ -156,14 +156,10 @@ const SPAWNS: u64 = 0xffeeb80362f78a05;
 #[test]
 fn every_pit_shader_translates() {
     let Some(path) = pit() else { return };
-    let dir = crate::scratch_dirs::app_storage_root().join("test_shaders");
-    let _ = std::fs::remove_dir_all(&dir);
-    let n = crate::draw::shaders::dump_variations(&std::fs::read(&path).unwrap(), &dir).unwrap();
-    let (ok, all) = crate::draw::shaders::translate_dir(&dir).unwrap();
-    println!("{n} stages dumped, {ok} of {all} translated");
-    assert!(all > 0);
-    assert_eq!(ok, all);
-    let _ = std::fs::remove_dir_all(&dir);
+    let library = crate::draw::shaders::Library::translate(&std::fs::read(&path).unwrap()).unwrap();
+    println!("{} of {} stages translated", library.translated(), library.tried);
+    assert!(library.tried > 0);
+    assert_eq!(library.translated(), library.tried);
 }
 
 /// Every field a recipe sets is a real field, and every recipe sets something.

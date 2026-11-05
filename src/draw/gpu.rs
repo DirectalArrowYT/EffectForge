@@ -1,148 +1,73 @@
-//! Drawing effects with the game's own shaders.
+//! Running the game's effect shaders on wgpu.
 //!
-//! Every emitter names one shader variation of its file (`shader_references.shader_index`): a Maxwell vertex and
-//! fragment program in the file's BNSH, which this runs. The programs are translated to WGSL (`draw::mx`, through
-//! draw::shaders), with this binding layout:
+//! A draw names a shader variation of its file (`shader_references.shader_index`), whose two translated stages
+//! ([`crate::draw::shaders::Library`]) bind, as `draw::mx::wgsl` lays them out:
 //!
-//! * set 0: the vertex stage's constant buffer `c<n>` at binding n, the fragment stage's at 20 + n, each a read-only
-//!   storage buffer of `uint`; the alpha test / point size block at 19 (vertex) and 39 (fragment).
-//! * set 1: fragment texture unit u at binding u, vertex at 32 + u; each texture's sampler 64 above it.
-//! * vertex input: generic attribute n at location n, always read as a `vec4`.
+//! * set 0: constant buffer c<n> of the vertex stage at binding n and of the fragment stage at 20 + n, each a
+//!   read-only storage buffer; each stage's alpha test / point size block at 19 above its base.
+//! * set 1: texture unit u of the fragment stage at binding u and of the vertex stage at 32 + u, with its sampler
+//!   64 above.
+//! * vertex input n at location n, a `vec4` of floats.
 //!
-//! The constant buffers are the game's own memory, byte for byte. What the shaders read, by NVN slot (`c<slot + 3>`):
-//! 0 (c3), 1 (c4), 5 (c8) the camera, 6 (c9) the emitter block (header 0x50 + the emitter's static data),
-//! 7 (c10), 8 (c11), 10 (c13), 11 (c14), 12 (c15), 13 (c16). c1 is the program's own constant data, c2 the driver's
-//! texture table. `draw::inputs` builds each of them from the .eff,
-//! checked against recomp captures of the game's own.
+//! The constant buffers hold what the game keeps in them, byte for byte (by c-index: 8 the camera, 9 the emitter
+//! block, 10 the per-frame emitter state, 13 and 16 custom data, see `draw::inputs`). c1 is the program's own
+//! constant data and c2 the driver's texture table; any other buffer a stage reads and the draw does not give reads
+//! zeros.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use wgpu::util::DeviceExt;
 
-pub const VERTEX: u32 = 0;
-pub const FRAGMENT: u32 = 1;
+use crate::draw::mx::wgsl::{Stage, FRAGMENT_CBUF_BASE, SAMPLER_SPLIT, VERTEX_TEXTURE_BASE};
+use crate::draw::shaders::{Library, Program};
 
-const FRAGMENT_CBUF_BASE: u32 = 20;
-const MXPC_BINDING: [u32; 2] = [19, 39];
-const SAMPLER_SPLIT: u32 = 64;
-/// c2, the driver's texture table (handles, then texture sizes from word 96): no translated effect shader reads it,
-/// but the fragment stages declare it.
+const STAGES: [Stage; 2] = [Stage::Vertex, Stage::Fragment];
+/// Constant buffers c0..c17 can be bound.
+const CBUF_COUNT: u32 = 18;
+/// c2's size: 96 words of texture handles, then their sizes. No translated effect shader reads it, but fragment
+/// stages declare it.
 const TEXTURE_TABLE_BYTES: usize = 896;
-/// The alpha test / point size block: function 8 (always passes), reference 0, point size 1. Every captured effect
-/// draw had the alpha test off.
+/// Contents of a buffer a stage reads and the draw does not give.
+const EMPTY_CBUF_BYTES: usize = 256;
+/// The alpha test / point size block: test function 8 (always pass), reference 0, point size 1.0. Every captured
+/// effect draw had the test off.
 const ALPHA_TEST_OFF: [u32; 4] = [8, 0, 0x3f80_0000, 0];
+/// OpenGL's value of a vertex attribute with no array.
+const MISSING_ATTRIBUTE: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// A texture unit one stage samples, and the binding of its texture (the sampler is `SAMPLER_SPLIT` above).
-#[derive(Clone, Copy, Debug)]
-pub struct SamplerSlot {
-    pub unit: u32,
-    pub binding: u32,
-}
-
-/// What one stage of a variation reads.
-#[derive(Clone, Debug)]
-pub struct StageInfo {
-    /// Bit n: the stage reads constant buffer c<n>.
-    pub cbufs: u32,
-    /// Bit n: the stage reads generic input n (vertex) or interpolant n (fragment).
-    pub inputs: u32,
-    pub samplers: Vec<SamplerSlot>,
-    /// c1: the program's constant data, from its code section.
-    pub constants: Vec<u8>,
-    /// The vertex inputs' names in the program's reflection (`sysLocalPosAttr` ...), with their locations.
-    pub reflection: Reflection,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Reflection {
-    pub inputs: Vec<(String, i32)>,
-}
-
-impl Reflection {
-    fn read(path: &Path) -> Self {
-        let Ok(text) = std::fs::read(path) else { return Self::default() };
-        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&text) else { return Self::default() };
-        let inputs = json["inputs"].as_array().map_or_else(Vec::new, |a| {
-            a.iter().filter_map(|p| Some((p[0].as_str()?.to_string(), p[1].as_i64()? as i32))).collect()
-        });
-        Self { inputs }
-    }
-
-    pub fn input(&self, name: &str) -> Option<u32> {
-        self.inputs.iter().find(|(n, _)| n == name).and_then(|&(_, l)| u32::try_from(l).ok())
+fn cbuf_base(stage: Stage) -> u32 {
+    match stage {
+        Stage::Vertex => 0,
+        Stage::Fragment => FRAGMENT_CBUF_BASE,
     }
 }
 
-fn le_u32(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+fn alpha_test_binding(stage: Stage) -> u32 {
+    cbuf_base(stage) + CBUF_COUNT + 1
 }
 
-/// The translated shaders of one effect file: the shader dump (`v<i>_s<stage>.code` / `.ctl`, written by
-/// draw::shaders) with its WGSL translation, `wgsl/`, beside it.
-pub struct ShaderLibrary {
-    dir: PathBuf,
-    stages: HashMap<(u32, u32), StageInfo>,
-}
-
-impl ShaderLibrary {
-    pub fn open(dir: &Path) -> Result<Self> {
-        let index_path = dir.join("wgsl").join("index.json");
-        let index: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&index_path).with_context(|| format!("reading {}", index_path.display()))?,
-        )?;
-        let variations = index["variations"].as_object().ok_or_else(|| anyhow!("{}: no variations", index_path.display()))?;
-        let mut stages = HashMap::new();
-        for (key, v) in variations {
-            let variation: u32 = key.parse()?;
-            for (stage, name, file_stage) in [(VERTEX, "vs", 0), (FRAGMENT, "fs", 4)] {
-                let s = &v[name];
-                if s["ok"].as_bool() != Some(true) {
-                    continue;
-                }
-                let base = dir.join(format!("v{variation:04}_s{file_stage}"));
-                // A stage whose dump is missing is left out (the variation is then not drawable), as is one the
-                // translation failed on.
-                let (Ok(code), Ok(ctl)) = (std::fs::read(base.with_extension("code")), std::fs::read(base.with_extension("ctl"))) else {
-                    continue;
-                };
-                // The control section says where the program's constant data (c1) sits in its code.
-                let (c_size, c_off) = (le_u32(&ctl, 0x6fc).unwrap_or(0) as usize, le_u32(&ctl, 0x700).unwrap_or(0) as usize);
-                let info = StageInfo {
-                    cbufs: s["cbufs"].as_u64().unwrap_or(0) as u32,
-                    inputs: s["in"].as_u64().unwrap_or(0) as u32,
-                    samplers: s["samplers"]
-                        .as_array()
-                        .map(|list| {
-                            list.iter()
-                                .map(|x| SamplerSlot {
-                                    unit: x["unit"].as_u64().unwrap_or(0) as u32,
-                                    binding: x["binding"].as_u64().unwrap_or(0) as u32,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    constants: code.get(c_off..c_off + c_size).map(|c| c.to_vec()).unwrap_or_default(),
-                    reflection: Reflection::read(&dir.join(format!("v{variation:04}_s{file_stage}.reflect.json"))),
-                };
-                stages.insert((variation, stage), info);
-            }
-        }
-        Ok(Self { dir: dir.to_path_buf(), stages })
-    }
-
-    pub fn stage(&self, variation: u32, stage: u32) -> Option<&StageInfo> {
-        self.stages.get(&(variation, stage))
-    }
-
-    fn wgsl(&self, variation: u32, stage: u32) -> Result<String> {
-        let path = self.dir.join("wgsl").join(format!("v{variation:04}_s{}.wgsl", if stage == VERTEX { 0 } else { 4 }));
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+fn texture_binding(stage: Stage, unit: u32) -> u32 {
+    match stage {
+        Stage::Vertex => VERTEX_TEXTURE_BASE + unit,
+        Stage::Fragment => unit,
     }
 }
 
-/// One vertex input, already widened to `vec4`s (see [`decode_attribute`]).
+fn visibility(stage: Stage) -> wgpu::ShaderStages {
+    match stage {
+        Stage::Vertex => wgpu::ShaderStages::VERTEX,
+        Stage::Fragment => wgpu::ShaderStages::FRAGMENT,
+    }
+}
+
+/// Set bits of a mask below `limit`, ascending.
+fn bits(mask: u32, limit: u32) -> impl Iterator<Item = u32> {
+    (0..limit).filter(move |n| mask >> n & 1 != 0)
+}
+
+/// One vertex input: a `vec4` per vertex, or per particle when `per_instance`.
 #[derive(Clone, Debug)]
 pub struct VertexInput {
     pub location: u32,
@@ -153,10 +78,11 @@ pub struct VertexInput {
 /// A sampler in NVN's terms.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct SamplerKey {
-    /// 0 nearest, 1 linear, then nearest / linear with nearest mips (2, 3) or linear mips (4, 5).
+    /// 0 nearest, 1 linear; 2 / 3 the same with nearest mips, 4 / 5 with linear mips.
     pub min: u8,
+    /// 0 nearest, otherwise linear.
     pub mag: u8,
-    /// 1 repeat, 6 mirrored repeat, anything else clamps.
+    /// 1 repeat, 6 mirrored repeat, anything else clamps to the edge.
     pub wrap_s: u8,
     pub wrap_t: u8,
     pub lod_min_bits: u32,
@@ -169,17 +95,47 @@ impl Default for SamplerKey {
     }
 }
 
+impl SamplerKey {
+    fn descriptor(&self) -> wgpu::SamplerDescriptor<'static> {
+        let filter = |linear: bool| if linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
+        let wrap = |mode: u8| match mode {
+            1 => wgpu::AddressMode::Repeat,
+            6 => wgpu::AddressMode::MirrorRepeat,
+            _ => wgpu::AddressMode::ClampToEdge,
+        };
+        // Without mips the level is pinned to 0.
+        let (lod_min, lod_max) = if self.min >= 2 {
+            let min = f32::from_bits(self.lod_min_bits).clamp(0.0, 32.0);
+            (min, f32::from_bits(self.lod_max_bits).clamp(min, 32.0))
+        } else {
+            (0.0, 0.0)
+        };
+        wgpu::SamplerDescriptor {
+            label: Some("effect sampler"),
+            address_mode_u: wrap(self.wrap_s),
+            address_mode_v: wrap(self.wrap_t),
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: filter(self.mag != 0),
+            min_filter: filter(self.min % 2 == 1),
+            mipmap_filter: if self.min >= 4 { wgpu::MipmapFilterMode::Linear } else { wgpu::MipmapFilterMode::Nearest },
+            lod_min_clamp: lod_min,
+            lod_max_clamp: lod_max,
+            ..Default::default()
+        }
+    }
+}
+
 pub struct TextureInput<'a> {
-    pub stage: u32,
+    pub stage: Stage,
     pub unit: u32,
     pub view: &'a wgpu::TextureView,
     pub sampler: SamplerKey,
 }
 
-/// The fixed-function state of a draw, in the OpenGL enums the capture records.
+/// The fixed-function state of a draw, in NVN / OpenGL enums.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct DrawState {
-    /// NVN primitive: 0 points, 1 lines, 3 line strip, 4 triangles, 5 triangle strip.
+    /// 0 points, 1 lines, 3 line strip, 4 triangles, 5 triangle strip.
     pub prim: u32,
     pub indexed: bool,
     /// src rgb, dst rgb, equation rgb, src alpha, dst alpha, equation alpha.
@@ -188,10 +144,79 @@ pub struct DrawState {
     pub depth_write: bool,
 }
 
+fn blend_factor(gl: u32) -> wgpu::BlendFactor {
+    use wgpu::BlendFactor as F;
+    match gl {
+        0 => F::Zero,
+        0x300 => F::Src,
+        0x301 => F::OneMinusSrc,
+        0x302 => F::SrcAlpha,
+        0x303 => F::OneMinusSrcAlpha,
+        0x304 => F::DstAlpha,
+        0x305 => F::OneMinusDstAlpha,
+        0x306 => F::Dst,
+        0x307 => F::OneMinusDst,
+        0x308 => F::SrcAlphaSaturated,
+        0x8001 => F::Constant,
+        0x8002 => F::OneMinusConstant,
+        _ => F::One,
+    }
+}
+
+fn blend_component(src: u32, dst: u32, equation: u32) -> wgpu::BlendComponent {
+    use wgpu::BlendOperation as O;
+    let operation = match equation {
+        0x800A => O::Subtract,
+        0x800B => O::ReverseSubtract,
+        0x8007 => O::Min,
+        0x8008 => O::Max,
+        _ => O::Add,
+    };
+    // OpenGL ignores the factors of min and max; wgpu wants them One.
+    let (src, dst) = match operation {
+        O::Min | O::Max => (1, 1),
+        _ => (src, dst),
+    };
+    wgpu::BlendComponent { src_factor: blend_factor(src), dst_factor: blend_factor(dst), operation }
+}
+
+fn depth_compare(gl: Option<u32>) -> wgpu::CompareFunction {
+    use wgpu::CompareFunction as C;
+    match gl {
+        Some(0x200) => C::Never,
+        Some(0x201) => C::Less,
+        Some(0x202) => C::Equal,
+        Some(0x203) => C::LessEqual,
+        Some(0x204) => C::Greater,
+        Some(0x205) => C::NotEqual,
+        Some(0x206) => C::GreaterEqual,
+        _ => C::Always,
+    }
+}
+
+fn topology(prim: u32) -> Result<wgpu::PrimitiveTopology> {
+    use wgpu::PrimitiveTopology as T;
+    Ok(match prim {
+        0 => T::PointList,
+        1 => T::LineList,
+        3 => T::LineStrip,
+        4 => T::TriangleList,
+        5 => T::TriangleStrip,
+        other => bail!("NVN primitive {other} has no wgpu topology"),
+    })
+}
+
+/// A constant buffer's contents, grown to a whole number of 16-byte rows (at least one).
+fn rows_of(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    out.resize(bytes.len().div_ceil(16).max(1) * 16, 0);
+    out
+}
+
 pub struct DrawInputs<'a> {
     pub variation: u32,
-    /// (stage, n, contents of c<n>). c1 and c2 come from the library; anything else not listed reads zeros.
-    pub cbufs: Vec<(u32, u32, &'a [u8])>,
+    /// (stage, n, contents of c<n>). c1 and c2 come from the library.
+    pub cbufs: Vec<(Stage, u32, &'a [u8])>,
     pub vertices: Vec<VertexInput>,
     pub indices: Option<Vec<u32>>,
     pub state: DrawState,
@@ -213,8 +238,9 @@ pub struct PreparedDraw {
 impl PreparedDraw {
     pub fn encode(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.groups[0], &[]);
-        pass.set_bind_group(1, &self.groups[1], &[]);
+        for (set, group) in self.groups.iter().enumerate() {
+            pass.set_bind_group(set as u32, group, &[]);
+        }
         for (slot, buffer) in self.vertex_buffers.iter().enumerate() {
             pass.set_vertex_buffer(slot as u32, buffer.slice(..));
         }
@@ -228,220 +254,179 @@ impl PreparedDraw {
     }
 }
 
+/// How each vertex input location the vertex stage reads is fed: per particle or per vertex, and whether it is one
+/// constant value (stride 0).
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct VertexSlot {
+    location: u32,
+    per_instance: bool,
+    constant: bool,
+}
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct PipelineKey {
     variation: u32,
-    /// Per vertex input location, in buffer order: (location, per instance).
-    vertex_layout: Vec<(u32, bool)>,
+    slots: Vec<VertexSlot>,
     state: DrawState,
     color: wgpu::TextureFormat,
     depth: Option<wgpu::TextureFormat>,
 }
 
-struct Layouts {
+struct Layout {
     groups: [wgpu::BindGroupLayout; 2],
     pipeline: wgpu::PipelineLayout,
 }
 
+/// Both stages of a variation, or why it cannot draw.
+fn programs(library: &Library, variation: u32) -> Result<[&Program; 2]> {
+    let get = |stage| library.program(variation, stage).ok_or_else(|| anyhow!("variation {variation} has no {stage:?} stage"));
+    Ok([get(Stage::Vertex)?, get(Stage::Fragment)?])
+}
+
 pub struct GameEffectRenderer {
-    pub library: ShaderLibrary,
-    modules: HashMap<(u32, u32), wgpu::ShaderModule>,
-    layouts: HashMap<u32, Layouts>,
+    pub library: Arc<Library>,
+    modules: HashMap<(u32, Stage), wgpu::ShaderModule>,
+    layouts: HashMap<u32, Layout>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     samplers: HashMap<SamplerKey, wgpu::Sampler>,
-    /// Bound to every unit a draw does not supply: white, so an unbound depth texture reads "far".
-    fallback: wgpu::TextureView,
-}
-
-fn blend_factor(gl: u32) -> wgpu::BlendFactor {
-    use wgpu::BlendFactor as F;
-    match gl {
-        0 => F::Zero,
-        1 => F::One,
-        0x300 => F::Src,
-        0x301 => F::OneMinusSrc,
-        0x302 => F::SrcAlpha,
-        0x303 => F::OneMinusSrcAlpha,
-        0x304 => F::DstAlpha,
-        0x305 => F::OneMinusDstAlpha,
-        0x306 => F::Dst,
-        0x307 => F::OneMinusDst,
-        0x308 => F::SrcAlphaSaturated,
-        0x8001 => F::Constant,
-        0x8002 => F::OneMinusConstant,
-        _ => F::One,
-    }
-}
-
-fn blend_operation(gl: u32) -> wgpu::BlendOperation {
-    use wgpu::BlendOperation as O;
-    match gl {
-        0x800A => O::Subtract,
-        0x800B => O::ReverseSubtract,
-        0x8007 => O::Min,
-        0x8008 => O::Max,
-        _ => O::Add,
-    }
-}
-
-fn blend_component(src: u32, dst: u32, eq: u32) -> wgpu::BlendComponent {
-    let operation = blend_operation(eq);
-    // Min and max ignore the factors in OpenGL; wgpu requires them to be One.
-    if matches!(operation, wgpu::BlendOperation::Min | wgpu::BlendOperation::Max) {
-        return wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation };
-    }
-    wgpu::BlendComponent { src_factor: blend_factor(src), dst_factor: blend_factor(dst), operation }
-}
-
-fn compare(gl: u32) -> wgpu::CompareFunction {
-    use wgpu::CompareFunction as C;
-    match gl {
-        0x200 => C::Never,
-        0x201 => C::Less,
-        0x202 => C::Equal,
-        0x203 => C::LessEqual,
-        0x204 => C::Greater,
-        0x205 => C::NotEqual,
-        0x206 => C::GreaterEqual,
-        _ => C::Always,
-    }
-}
-
-fn topology(prim: u32) -> Result<wgpu::PrimitiveTopology> {
-    use wgpu::PrimitiveTopology as T;
-    Ok(match prim {
-        0 => T::PointList,
-        1 => T::LineList,
-        3 => T::LineStrip,
-        4 => T::TriangleList,
-        5 => T::TriangleStrip,
-        other => bail!("NVN primitive {other} has no wgpu topology"),
-    })
-}
-
-fn padded(bytes: &[u8]) -> Vec<u8> {
-    let mut out = bytes.to_vec();
-    out.resize(bytes.len().div_ceil(16).max(1) * 16, 0);
-    out
+    /// Bound to every unit a draw does not fill: white, so an unbound depth texture reads "far".
+    white: wgpu::TextureView,
 }
 
 impl GameEffectRenderer {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, library: ShaderLibrary) -> Self {
-        let fallback = device
-            .create_texture_with_data(
-                queue,
-                &wgpu::TextureDescriptor {
-                    label: Some("game effect fallback texture"),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                wgpu::util::TextureDataOrder::LayerMajor,
-                &[255, 255, 255, 255],
-            )
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, library: Arc<Library>) -> Self {
+        let white = upload(device, queue, "unbound texture", 1, 1, 1, wgpu::TextureFormat::Rgba8Unorm, &[255; 4]);
         Self {
             library,
             modules: HashMap::new(),
             layouts: HashMap::new(),
             pipelines: HashMap::new(),
             samplers: HashMap::new(),
-            fallback,
+            white,
         }
     }
 
-    fn module(&mut self, device: &wgpu::Device, variation: u32, stage: u32) -> Result<wgpu::ShaderModule> {
-        if let Some(m) = self.modules.get(&(variation, stage)) {
-            return Ok(m.clone());
+    fn module(&mut self, device: &wgpu::Device, variation: u32, stage: Stage) -> Result<wgpu::ShaderModule> {
+        if let Some(module) = self.modules.get(&(variation, stage)) {
+            return Ok(module.clone());
         }
-        let text = self.library.wgsl(variation, stage)?;
+        let program = self.library.program(variation, stage).ok_or_else(|| anyhow!("variation {variation}: no {stage:?} stage"))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!("effect shader v{variation} s{stage}")),
-            source: wgpu::ShaderSource::Wgsl(text.into()),
+            label: Some(&format!("effect shader v{variation} {stage:?}")),
+            source: wgpu::ShaderSource::Wgsl(program.wgsl.as_str().into()),
         });
         self.modules.insert((variation, stage), module.clone());
         Ok(module)
     }
 
-    fn layouts(&mut self, device: &wgpu::Device, variation: u32) -> Result<&Layouts> {
+    fn layout(&mut self, device: &wgpu::Device, variation: u32) -> Result<&Layout> {
         if !self.layouts.contains_key(&variation) {
+            let library = self.library.clone();
+            let programs = programs(&library, variation)?;
             let mut buffers = Vec::new();
             let mut textures = Vec::new();
-            for stage in [VERTEX, FRAGMENT] {
-                let info = self.library.stage(variation, stage).ok_or_else(|| anyhow!("variation {variation} has no stage {stage}"))?;
-                let visibility = if stage == VERTEX { wgpu::ShaderStages::VERTEX } else { wgpu::ShaderStages::FRAGMENT };
-                let base = if stage == VERTEX { 0 } else { FRAGMENT_CBUF_BASE };
+            for (stage, program) in STAGES.into_iter().zip(programs) {
+                let visibility = visibility(stage);
+                let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None };
                 let storage = wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 };
-                for n in (0..18).filter(|n| info.cbufs >> n & 1 != 0) {
-                    buffers.push(wgpu::BindGroupLayoutEntry { binding: base + n, visibility, ty: storage, count: None });
-                }
-                buffers.push(wgpu::BindGroupLayoutEntry { binding: MXPC_BINDING[stage as usize], visibility, ty: storage, count: None });
-                for slot in &info.samplers {
-                    textures.push(wgpu::BindGroupLayoutEntry {
-                        binding: slot.binding,
-                        visibility,
-                        ty: wgpu::BindingType::Texture {
+                buffers.extend(bits(program.cbufs, CBUF_COUNT).map(|n| entry(cbuf_base(stage) + n, storage)));
+                buffers.push(entry(alpha_test_binding(stage), storage));
+                for &unit in &program.units {
+                    let binding = texture_binding(stage, unit);
+                    textures.push(entry(
+                        binding,
+                        wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
-                        count: None,
-                    });
-                    textures.push(wgpu::BindGroupLayoutEntry {
-                        binding: slot.binding + SAMPLER_SPLIT,
-                        visibility,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    });
+                    ));
+                    textures.push(entry(binding + SAMPLER_SPLIT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)));
                 }
             }
-            let group0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("game effect buffers"), entries: &buffers });
-            let group1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("game effect textures"), entries: &textures });
+            let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+            };
+            let groups = [group("effect buffers", &buffers), group("effect textures", &textures)];
             let pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("game effect pipeline layout"),
-                bind_group_layouts: &[Some(&group0), Some(&group1)],
+                label: Some("effect pipeline layout"),
+                bind_group_layouts: &[Some(&groups[0]), Some(&groups[1])],
                 immediate_size: 0,
             });
-            self.layouts.insert(variation, Layouts { groups: [group0, group1], pipeline });
+            self.layouts.insert(variation, Layout { groups, pipeline });
         }
         Ok(&self.layouts[&variation])
     }
 
-    fn sampler(&mut self, device: &wgpu::Device, key: SamplerKey) -> wgpu::Sampler {
-        self.samplers
-            .entry(key)
-            .or_insert_with(|| {
-                let filter = |linear: bool| if linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
-                let wrap = |w: u8| match w {
-                    1 => wgpu::AddressMode::Repeat,
-                    6 => wgpu::AddressMode::MirrorRepeat,
-                    _ => wgpu::AddressMode::ClampToEdge,
-                };
-                let mipmapped = key.min >= 2;
-                let lod_min = f32::from_bits(key.lod_min_bits).clamp(0.0, 32.0);
-                let lod_max = f32::from_bits(key.lod_max_bits).clamp(lod_min, 32.0);
-                device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("game effect sampler"),
-                    address_mode_u: wrap(key.wrap_s),
-                    address_mode_v: wrap(key.wrap_t),
-                    address_mode_w: wgpu::AddressMode::ClampToEdge,
-                    mag_filter: filter(key.mag != 0),
-                    min_filter: filter(key.min % 2 == 1),
-                    mipmap_filter: if key.min >= 4 { wgpu::MipmapFilterMode::Linear } else { wgpu::MipmapFilterMode::Nearest },
-                    lod_min_clamp: if mipmapped { lod_min } else { 0.0 },
-                    lod_max_clamp: if mipmapped { lod_max } else { 0.0 },
-                    ..Default::default()
-                })
+    fn pipeline(&mut self, device: &wgpu::Device, key: PipelineKey) -> Result<wgpu::RenderPipeline> {
+        if let Some(pipeline) = self.pipelines.get(&key) {
+            return Ok(pipeline.clone());
+        }
+        let variation = key.variation;
+        let vs = self.module(device, variation, Stage::Vertex)?;
+        let fs = self.module(device, variation, Stage::Fragment)?;
+        let attributes: Vec<[wgpu::VertexAttribute; 1]> = key
+            .slots
+            .iter()
+            .map(|s| [wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: s.location }])
+            .collect();
+        let buffers: Vec<wgpu::VertexBufferLayout> = key
+            .slots
+            .iter()
+            .zip(&attributes)
+            .map(|(s, attributes)| wgpu::VertexBufferLayout {
+                array_stride: if s.constant { 0 } else { 16 },
+                step_mode: if s.per_instance { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex },
+                attributes,
             })
-            .clone()
+            .collect();
+        let state = key.state;
+        let topology = topology(state.prim)?;
+        let layout = &self.layout(device, variation)?.pipeline;
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("effect v{variation}")),
+            layout: Some(layout),
+            vertex: wgpu::VertexState { module: &vs, entry_point: Some("main"), buffers: &buffers, compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &fs,
+                entry_point: Some("main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: key.color,
+                    blend: state.blend.map(|b| wgpu::BlendState {
+                        color: blend_component(b[0], b[1], b[2]),
+                        alpha: blend_component(b[3], b[4], b[5]),
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology,
+                strip_index_format: (state.indexed && topology.is_strip()).then_some(wgpu::IndexFormat::Uint32),
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: key.depth.map(|format| wgpu::DepthStencilState {
+                format,
+                depth_write_enabled: Some(state.depth_write && state.depth_test.is_some()),
+                depth_compare: Some(depth_compare(state.depth_test)),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.pipelines.insert(key, pipeline.clone());
+        Ok(pipeline)
+    }
+
+    fn sampler(&mut self, device: &wgpu::Device, key: SamplerKey) -> wgpu::Sampler {
+        self.samplers.entry(key).or_insert_with(|| device.create_sampler(&key.descriptor())).clone()
     }
 
     pub fn prepare(
@@ -452,208 +437,140 @@ impl GameEffectRenderer {
         depth: Option<wgpu::TextureFormat>,
     ) -> Result<PreparedDraw> {
         let variation = inputs.variation;
-        let vs_inputs = self.library.stage(variation, VERTEX).ok_or_else(|| anyhow!("variation {variation}: no vertex stage"))?.inputs;
+        let library = self.library.clone();
+        let programs = programs(&library, variation)?;
 
-        // Vertex buffers: one per input location the vertex stage reads; a location the draw does not supply reads
-        // (0, 0, 0, 1), OpenGL's value for a disabled attribute, from a single instance-rate element.
-        let mut vertex_layout = Vec::new();
+        // One vertex buffer per location the vertex stage reads; a location the draw leaves out reads
+        // MISSING_ATTRIBUTE from a single element.
+        let mut slots = Vec::new();
         let mut vertex_buffers = Vec::new();
-        for location in (0..32).filter(|l| vs_inputs >> l & 1 != 0) {
-            let supplied = inputs.vertices.iter().find(|v| v.location == location);
-            let (data, per_instance): (Vec<[f32; 4]>, bool) = match supplied {
-                Some(v) if !v.data.is_empty() => (v.data.clone(), v.per_instance),
-                _ => (vec![[0.0, 0.0, 0.0, 1.0]], true),
+        for location in bits(programs[0].inputs, 32) {
+            let given = inputs.vertices.iter().find(|v| v.location == location).filter(|v| !v.data.is_empty());
+            let (data, per_instance) = match given {
+                Some(v) => (v.data.as_slice(), v.per_instance),
+                None => (std::slice::from_ref(&MISSING_ATTRIBUTE), true),
             };
-            let stride_zero = supplied.is_none_or(|v| v.data.is_empty());
-            vertex_layout.push((location, per_instance));
-            vertex_buffers.push((device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("game effect vertex input"),
-                contents: bytemuck::cast_slice(&data),
+            slots.push(VertexSlot { location, per_instance, constant: given.is_none() });
+            vertex_buffers.push(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("effect vertex input"),
+                contents: bytemuck::cast_slice(data),
                 usage: wgpu::BufferUsages::VERTEX,
-            }), stride_zero));
+            }));
         }
-        let key = PipelineKey { variation, vertex_layout: vertex_layout.clone(), state: inputs.state, color, depth };
-        let pipeline = match self.pipelines.get(&key) {
-            Some(p) => p.clone(),
-            None => {
-                let vs = self.module(device, variation, VERTEX)?;
-                let fs = self.module(device, variation, FRAGMENT)?;
-                let strides: Vec<bool> = vertex_buffers.iter().map(|(_, zero)| *zero).collect();
-                let attributes: Vec<[wgpu::VertexAttribute; 1]> = vertex_layout
-                    .iter()
-                    .map(|&(location, _)| [wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: location }])
-                    .collect();
-                let buffers: Vec<wgpu::VertexBufferLayout> = vertex_layout
-                    .iter()
-                    .zip(&attributes)
-                    .zip(&strides)
-                    .map(|((&(_, per_instance), attrs), &zero)| wgpu::VertexBufferLayout {
-                        array_stride: if zero { 0 } else { 16 },
-                        step_mode: if per_instance { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex },
-                        attributes: attrs,
-                    })
-                    .collect();
-                let state = inputs.state;
-                let topology = topology(state.prim)?;
-                let blend = state.blend.map(|b| wgpu::BlendState {
-                    color: blend_component(b[0], b[1], b[2]),
-                    alpha: blend_component(b[3], b[4], b[5]),
-                });
-                let layout = &self.layouts(device, variation)?.pipeline;
-                let p = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(&format!("game effect v{variation}")),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState { module: &vs, entry_point: Some("main"), buffers: &buffers, compilation_options: Default::default() },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &fs,
-                        entry_point: Some("main"),
-                        targets: &[Some(wgpu::ColorTargetState { format: color, blend, write_mask: wgpu::ColorWrites::ALL })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology,
-                        strip_index_format: (state.indexed && topology.is_strip()).then_some(wgpu::IndexFormat::Uint32),
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: depth.map(|format| wgpu::DepthStencilState {
-                        format,
-                        depth_write_enabled: Some(state.depth_write && state.depth_test.is_some()),
-                        depth_compare: Some(state.depth_test.map(compare).unwrap_or(wgpu::CompareFunction::Always)),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                });
-                self.pipelines.insert(key, p.clone());
-                p
-            }
-        };
+        let pipeline = self.pipeline(device, PipelineKey { variation, slots, state: inputs.state, color, depth })?;
 
-        // Set 0: constant buffers and the alpha test.
-        let mut buffers: Vec<(u32, wgpu::Buffer)> = Vec::new();
-        for stage in [VERTEX, FRAGMENT] {
-            let info = self.library.stage(variation, stage).unwrap();
-            let base = if stage == VERTEX { 0 } else { FRAGMENT_CBUF_BASE };
-            for n in (0..18).filter(|n| info.cbufs >> n & 1 != 0) {
+        // Set 0: each stage's constant buffers, then its alpha test block.
+        let mut buffers = Vec::new();
+        for (stage, program) in STAGES.into_iter().zip(programs) {
+            for n in bits(program.cbufs, CBUF_COUNT) {
                 let contents = match n {
-                    1 => padded(&info.constants),
-                    2 => vec![0u8; TEXTURE_TABLE_BYTES],
+                    1 => rows_of(&program.constants),
+                    2 => vec![0; TEXTURE_TABLE_BYTES],
                     _ => inputs
                         .cbufs
                         .iter()
-                        .find(|(s, i, _)| *s == stage && *i == n)
-                        .map(|(_, _, b)| padded(b))
-                        .unwrap_or_else(|| vec![0u8; 256]),
+                        .find(|&&(s, i, _)| s == stage && i == n)
+                        .map_or_else(|| vec![0; EMPTY_CBUF_BYTES], |&(_, _, bytes)| rows_of(bytes)),
                 };
-                buffers.push((base + n, device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("game effect constant buffer"),
-                    contents: &contents,
-                    usage: wgpu::BufferUsages::STORAGE,
-                })));
+                buffers.push((cbuf_base(stage) + n, storage(device, "effect constant buffer", &contents)));
             }
-            buffers.push((MXPC_BINDING[stage as usize], device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("game effect alpha test"),
-                contents: bytemuck::cast_slice(&ALPHA_TEST_OFF),
-                usage: wgpu::BufferUsages::STORAGE,
-            })));
+            buffers.push((alpha_test_binding(stage), storage(device, "effect alpha test", bytemuck::cast_slice(&ALPHA_TEST_OFF))));
         }
-        // Set 1: textures and samplers.
-        let mut views: Vec<(u32, wgpu::TextureView, wgpu::Sampler)> = Vec::new();
-        for stage in [VERTEX, FRAGMENT] {
-            let slots = self.library.stage(variation, stage).unwrap().samplers.clone();
-            for slot in slots {
-                let given = inputs.textures.iter().find(|t| t.stage == stage && t.unit == slot.unit);
-                let view = given.map(|t| t.view.clone()).unwrap_or_else(|| self.fallback.clone());
+        // Set 1: each unit a stage samples, from the draw or white.
+        let mut textures = Vec::new();
+        for (stage, program) in STAGES.into_iter().zip(programs) {
+            for &unit in &program.units {
+                let given = inputs.textures.iter().find(|t| t.stage == stage && t.unit == unit);
+                let view = given.map_or_else(|| self.white.clone(), |t| t.view.clone());
                 let sampler = self.sampler(device, given.map(|t| t.sampler).unwrap_or_default());
-                views.push((slot.binding, view, sampler));
+                textures.push((texture_binding(stage, unit), view, sampler));
             }
         }
-        let layouts = self.layouts(device, variation)?;
-        let group0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("game effect buffers"),
-            layout: &layouts.groups[0],
-            entries: &buffers
-                .iter()
-                .map(|(binding, b)| wgpu::BindGroupEntry { binding: *binding, resource: b.as_entire_binding() })
-                .collect::<Vec<_>>(),
-        });
-        let mut entries = Vec::new();
-        for (binding, view, sampler) in &views {
-            entries.push(wgpu::BindGroupEntry { binding: *binding, resource: wgpu::BindingResource::TextureView(view) });
-            entries.push(wgpu::BindGroupEntry { binding: binding + SAMPLER_SPLIT, resource: wgpu::BindingResource::Sampler(sampler) });
-        }
-        let group1 = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("game effect textures"), layout: &layouts.groups[1], entries: &entries });
+
+        let layout = self.layout(device, variation)?;
+        let buffer_entries: Vec<wgpu::BindGroupEntry> =
+            buffers.iter().map(|(binding, b)| wgpu::BindGroupEntry { binding: *binding, resource: b.as_entire_binding() }).collect();
+        let texture_entries: Vec<wgpu::BindGroupEntry> = textures
+            .iter()
+            .flat_map(|(binding, view, sampler)| {
+                [
+                    wgpu::BindGroupEntry { binding: *binding, resource: wgpu::BindingResource::TextureView(view) },
+                    wgpu::BindGroupEntry { binding: binding + SAMPLER_SPLIT, resource: wgpu::BindingResource::Sampler(sampler) },
+                ]
+            })
+            .collect();
+        let group = |label, layout, entries: &[wgpu::BindGroupEntry]| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries })
+        };
+        let groups = [
+            group("effect buffers", &layout.groups[0], &buffer_entries),
+            group("effect textures", &layout.groups[1], &texture_entries),
+        ];
         let index = inputs.indices.as_ref().map(|indices| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("game effect indices"),
+                label: Some("effect indices"),
                 contents: bytemuck::cast_slice(indices),
                 usage: wgpu::BufferUsages::INDEX,
             })
         });
-        Ok(PreparedDraw {
-            pipeline,
-            groups: [group0, group1],
-            vertex_buffers: vertex_buffers.into_iter().map(|(b, _)| b).collect(),
-            index,
-            count: inputs.count,
-            instances: inputs.instances.max(1),
-        })
+        Ok(PreparedDraw { pipeline, groups, vertex_buffers, index, count: inputs.count, instances: inputs.instances.max(1) })
     }
 }
 
-/// The camera constant buffer: the shaders' c8 (NVN slot 5, 320 bytes), for a right-handed view (looking down -z)
-/// and a projection to 0..1 depth (the game's is `Mat4::perspective_infinite_rh` with near 2).
-///
-/// Laid out as the game writes it, every matrix row-major: +0 view, +64 projection, +128 projection * view, +192 the
-/// view's rotation inverted (camera to world, no translation), +256 view row 2 (the camera's back axis in world space),
-/// +272 the camera position, +288 near, far, near * far, far. +304 is copied from `tail` (a capture has
-/// (1, 1, 0.01, 0); not yet known).
-pub fn camera_block(view: glam::Mat4, proj: glam::Mat4, near: f32, far: f32, tail: [f32; 4]) -> Vec<u8> {
-    let mut f = Vec::with_capacity(80);
-    let rows = |m: glam::Mat4, f: &mut Vec<f32>| {
-        for r in 0..4 {
-            f.extend_from_slice(&m.row(r).to_array());
-        }
-    };
-    rows(view, &mut f);
-    rows(proj, &mut f);
-    rows(proj * view, &mut f);
-    let rotation = glam::Mat4::from_mat3(glam::Mat3::from_mat4(view).transpose());
-    rows(rotation, &mut f);
-    f.extend_from_slice(&view.row(2).truncate().extend(0.0).to_array());
-    f.extend_from_slice(&view.inverse().w_axis.truncate().extend(0.0).to_array());
-    f.extend_from_slice(&[near, far, near * far, far]);
-    f.extend_from_slice(&tail);
-    bytemuck::cast_slice(&f).to_vec()
+fn storage(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage: wgpu::BufferUsages::STORAGE })
 }
 
-/// A texture as the game's shaders sample it (textures::decode_for_sampling), on the GPU with every mip.
+#[allow(clippy::too_many_arguments)]
+fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    mips: u32,
+    format: wgpu::TextureFormat,
+    data: &[u8],
+) -> wgpu::TextureView {
+    let descriptor = wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: mips,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    };
+    device.create_texture_with_data(queue, &descriptor, wgpu::util::TextureDataOrder::LayerMajor, data).create_view(&Default::default())
+}
+
+/// A texture as the game's shaders sample it (`textures::decode_for_sampling`), on the GPU with every mip.
 pub fn upload_sampled(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &crate::eff::textures::SampledTexture,
     label: &str,
 ) -> wgpu::TextureView {
-    let (w, h) = texture.levels[0].dimensions();
-    let data: Vec<u8> = texture.levels.iter().flat_map(|l| l.as_raw().iter().copied()).collect();
-    device
-        .create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: texture.levels.len() as u32,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: if texture.srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &data,
-        )
-        .create_view(&Default::default())
+    let (width, height) = texture.levels[0].dimensions();
+    let data: Vec<u8> = texture.levels.iter().flat_map(|level| level.as_raw().iter().copied()).collect();
+    let format = if texture.srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
+    upload(device, queue, label, width, height, texture.levels.len() as u32, format, &data)
+}
+
+/// The camera constant buffer, c8 (320 bytes), for a right-handed view looking down -z and a projection to 0..1
+/// depth (the game's is `Mat4::perspective_infinite_rh` with near 2).
+///
+/// As the game writes it, every matrix row by row: +0 view, +64 projection, +128 projection * view, +192 the view's
+/// rotation inverted (camera to world, no translation), +256 the view's third row (the camera's back axis in world
+/// space), +272 the camera's position, +288 near, far, near * far, far, +304 `tail` (a capture holds
+/// (1, 1, 0.01, 0); its meaning is not known).
+pub fn camera_block(view: glam::Mat4, proj: glam::Mat4, near: f32, far: f32, tail: [f32; 4]) -> Vec<u8> {
+    let rotation = glam::Mat4::from_mat3(glam::Mat3::from_mat4(view).transpose());
+    let mut floats: Vec<f32> = [view, proj, proj * view, rotation].iter().flat_map(|m| m.transpose().to_cols_array()).collect();
+    floats.extend(view.row(2).truncate().extend(0.0).to_array());
+    floats.extend(view.inverse().w_axis.truncate().extend(0.0).to_array());
+    floats.extend([near, far, near * far, far]);
+    floats.extend(tail);
+    bytemuck::cast_slice(&floats).to_vec()
 }

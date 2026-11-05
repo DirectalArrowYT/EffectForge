@@ -2,7 +2,6 @@
 //! the window shows. The effect sits at the origin with no fighter or bone, as a world spawn does.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,7 +9,8 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 
 use crate::draw::inputs::{Dynamic, GameDraw};
-use crate::draw::gpu::{DrawInputs, GameEffectRenderer, PreparedDraw, ShaderLibrary, TextureInput, FRAGMENT, VERTEX};
+use crate::draw::gpu::{DrawInputs, GameEffectRenderer, PreparedDraw, TextureInput};
+use crate::draw::mx::wgsl::Stage;
 use crate::eff::mesh_io::MeshData;
 use crate::draw::inputs::TextureKey;
 use crate::draw::sim::{spawns_moving, EmitterSim};
@@ -47,7 +47,7 @@ struct Target {
 pub struct Preview {
     render: RenderState,
     target: Option<Target>,
-    renderer: Option<(PathBuf, GameEffectRenderer)>,
+    renderer: Option<GameEffectRenderer>,
     /// What the open file's draws sample, built as needed and dropped when the file changes.
     meshes: HashMap<u64, Option<Arc<MeshData>>>,
     pixels: HashMap<usize, Option<Arc<SampledTexture>>>,
@@ -244,12 +244,11 @@ impl Preview {
 
     /// Draw this frame, and say which window texture holds it. `None` until the file's shaders are translated.
     pub fn render(&mut self, doc: &Doc, set_idx: usize, size: [u32; 2]) -> Result<Option<egui::TextureId>> {
-        let Some(dir) = crate::draw::shaders::ready(&doc.working()) else { return Ok(None) };
+        let Some(library) = crate::draw::shaders::ready(&doc.working()) else { return Ok(None) };
         let device = self.render.device.clone();
         let queue = self.render.queue.clone();
-        if self.renderer.as_ref().is_none_or(|(d, _)| *d != dir) {
-            let library = ShaderLibrary::open(&dir)?;
-            self.renderer = Some((dir, GameEffectRenderer::new(&device, &queue, library)));
+        if self.renderer.as_ref().is_none_or(|r| !std::sync::Arc::ptr_eq(&r.library, &library)) {
+            self.renderer = Some(GameEffectRenderer::new(&device, &queue, library));
         }
         let draws = self.draws(doc, set_idx);
         let camera = self.camera(size[0] as f32 / size[1] as f32);
@@ -262,18 +261,18 @@ impl Preview {
                 }
             }
         }
-        let (_, renderer) = self.renderer.as_mut().ok_or_else(|| anyhow!("no renderer"))?;
+        let renderer = self.renderer.as_mut().ok_or_else(|| anyhow!("no renderer"))?;
         let mut prepared: Vec<(usize, PreparedDraw)> = Vec::new();
         let mut problems = Vec::new();
         for (index, draw) in &draws {
             let Some(ready) = crate::draw::inputs::prepare(draw, &renderer.library) else { continue };
             let textures: Vec<TextureInput> = draw.textures.iter().enumerate().filter_map(|(unit, texture)| {
                 let (key, _) = texture.as_ref()?;
-                Some(TextureInput { stage: FRAGMENT, unit: unit as u32, view: self.views.get(key)?, sampler: draw.emitter.samplers[unit]?.1 })
+                Some(TextureInput { stage: Stage::Fragment, unit: unit as u32, view: self.views.get(key)?, sampler: draw.emitter.samplers[unit]?.1 })
             }).collect();
-            let mut cbufs: Vec<(u32, u32, &[u8])> = ready.cbufs.iter().map(|(s, n, b)| (*s, *n, b.as_slice())).collect();
-            cbufs.push((VERTEX, 8, &camera));
-            cbufs.push((FRAGMENT, 8, &camera));
+            let mut cbufs: Vec<(Stage, u32, &[u8])> = ready.cbufs.iter().map(|(s, n, b)| (*s, *n, b.as_slice())).collect();
+            cbufs.push((Stage::Vertex, 8, &camera));
+            cbufs.push((Stage::Fragment, 8, &camera));
             let inputs = DrawInputs {
                 variation: ready.variation, cbufs, vertices: ready.vertices, indices: ready.indices, state: ready.state,
                 count: ready.count, instances: ready.instances, textures,
