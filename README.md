@@ -25,6 +25,21 @@ A new effect is in the saved file only, so a rebuild of a generated file loses i
 over rebuilds like any tuned effect. Copied into a fighter's file (one under `effect/fighter/`), an effect gets the
 fighter type its spawns need. The move's script then spawns it by name; Forge does not write scripts.
 
+## Projects
+
+**New project…** starts a project from the open file: `<name>.forge` (the folders and where it exports) and
+`<name>.project.eff` beside it, a copy of the file holding every effect. Work in the project and **Save project**; the
+file in the mod is untouched until **Export**, which writes it to the file the project came from, or **Export to…**
+anywhere (the project remembers it). The first export keeps a `.forge-backup` of what was there. **Open** takes a
+`.forge` too.
+
+In a project the effect list is sorted into folders: name one and **New folder**, then drag effects onto a folder (or
+right-click one: **Move to**). Right-click a folder to rename or remove it; removing a folder keeps its effects. Tick a
+folder to skip it on export: the tick adds `UNUSED_` to its name, and every folder named `UNUSED_...` is left out. A
+skipped effect keeps its name in the exported file but plays nothing, and whatever only it used is dropped.
+
+**Rename** beside the effect's name renames it (letters, digits and `_`). Scripts that play it need the new name.
+
 ## Keeping tuned effects
 
 **Keep my tuning** copies the effect, as it is now, into the repo's tuned file:
@@ -76,4 +91,7 @@ and fades (`src/app/recipes.json`).
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
 - `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece>`, `add-layer <file.eff>
   <out.eff> <EFFECT> <piece>` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons.
+- `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export
+  to]` starts a project, `folder <p.forge> <folder> <EFFECT...>` puts effects in a folder, and `export <p.forge> [to]`
+  exports as the window does.
 - `effect_forge layers <file.eff> [EFFECT]` lists each effect's type and layers, with their textures and models.

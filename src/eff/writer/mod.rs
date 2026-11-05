@@ -134,6 +134,20 @@ pub fn keep_only_entries(src: &[u8], keep_entries: &[&str]) -> Result<Vec<u8>> {
         .context("effect_library failed to encode the reduced .eff")
 }
 
+/// The file with effect `old` called `new`. Only the name changes: its layers, and the sets
+/// they live in, stay as they are.
+pub fn rename_entry(src: &[u8], old: &str, new: &str) -> Result<Vec<u8>> {
+    let mut file = effect_library::NamcoEffectFile::load(src)
+        .context("effect_library failed to parse the .eff")?;
+    let at = file.entry_names.iter().position(|n| n.eq_ignore_ascii_case(old))
+        .ok_or_else(|| anyhow!("no effect called {old}"))?;
+    if file.entry_names.iter().enumerate().any(|(i, n)| i != at && n.eq_ignore_ascii_case(new)) {
+        return Err(anyhow!("there is already an effect called {new}"));
+    }
+    file.entry_names[at] = new.to_string();
+    file.save().context("effect_library failed to re-encode the .eff")
+}
+
 /// Read-only recursive emitter visit (children after parent).
 pub(super) fn visit_emitters_ref<F: FnMut(&effect_library::structs::Emitter)>(
     emitters: &[effect_library::structs::Emitter],

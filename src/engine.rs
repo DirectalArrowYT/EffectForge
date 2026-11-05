@@ -183,10 +183,7 @@ impl Doc {
 
     /// A new effect, `name`, made of a starter piece's layers.
     pub fn new_effect(&self, name: &str, piece: &Piece) -> Result<Self> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(anyhow!("the new effect needs a name"));
-        }
+        let name = check_effect_name(name)?;
         if self.loaded.entries.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
             return Err(anyhow!("this file already has an effect called {name}"));
         }
@@ -232,6 +229,18 @@ impl Doc {
         self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })
     }
 
+    /// The file with effect `old` renamed `new`.
+    pub fn rename(&self, old: &str, new: &str) -> Result<Self> {
+        let new = check_effect_name(new)?;
+        if old == new {
+            return Err(anyhow!("that is already its name"));
+        }
+        if self.loaded.entries.iter().any(|e| e.name.eq_ignore_ascii_case(new) && !e.name.eq_ignore_ascii_case(old)) {
+            return Err(anyhow!("this file already has an effect called {new}"));
+        }
+        Self::from_bytes(self.path.clone(), crate::eff::writer::rename_entry(&self.bytes, old, new)?)
+    }
+
     fn rebuilt(&self, eff: &EffMod) -> Result<Self> {
         self.rebuilt_from(eff, None)
     }
@@ -248,8 +257,20 @@ impl Doc {
     }
 }
 
+/// `name` trimmed, if the game can take it as an effect name: letters, digits and `_`.
+pub fn check_effect_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("an effect needs a name"));
+    }
+    if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '_')) {
+        return Err(anyhow!("effect names take letters, digits and _ only, not '{c}'"));
+    }
+    Ok(name)
+}
+
 /// Where a file sits in the game, as `effect/fighter/<name>/<file>.eff`: from its own path, or, for a tuned file, from
-/// the built file it goes back into. Empty when neither says. The writer gives an effect copied into a fighter's file
+/// the built file it goes back into, or, for a project's file, from where the project exports. Empty when none says. The writer gives an effect copied into a fighter's file
 /// the fighter type its spawns need.
 pub fn place_in_game(path: &Path) -> String {
     let from = |path: &Path| -> Option<String> {
@@ -259,6 +280,10 @@ pub fn place_in_game(path: &Path) -> String {
     };
     from(path)
         .or_else(|| Tuned::is_tuned_file(path).then(|| Tuned::load(path).into).flatten().and_then(|into| from(&into)))
+        .or_else(|| {
+            let project = crate::project::Project::load(&crate::project::project_of_eff(path)?).ok()?;
+            from(project.export_to.as_deref()?)
+        })
         .unwrap_or_default()
 }
 

@@ -15,6 +15,7 @@ use crate::eff::mesh_io::{self, MeshData};
 use crate::eff::model::EmitterDef;
 use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned};
 use crate::preview::Preview as GamePreview;
+use crate::project::{self, Project};
 
 enum Job {
     Open(PathBuf),
@@ -28,7 +29,11 @@ enum Job {
     AddLayer(String, &'static Piece),
     /// Layer n of an effect (and the layers under it) taken out.
     RemoveLayer(String, usize, usize),
+    /// Effect `.0` called `.1`.
+    Rename(String, String),
     Save,
+    /// The file without the skipped effects, written to the path.
+    Export(Vec<String>, PathBuf),
     /// Copy an effect into the tuned file.
     Stage(String, usize, PathBuf),
     /// Put the tuned file's effects into the file it was staged from.
@@ -38,6 +43,7 @@ enum Job {
 enum Done {
     Doc(Result<Doc>, String),
     Saved(Result<PathBuf>),
+    Exported(Result<usize>, PathBuf),
     Tuned(Result<Tuned>, String),
 }
 
@@ -105,6 +111,23 @@ pub struct App {
     only_tuned: bool,
     /// Layers drawing with another layer's shader, by (set, layer).
     borrowed: std::collections::HashMap<(usize, usize), controls::Borrowed>,
+    /// The open file's project: its folders and where it exports.
+    project: Option<Project>,
+    /// A rename on its way, for the project's folders to follow once it lands.
+    renaming: Option<(String, String)>,
+    rename_to: String,
+    folder_name: String,
+    /// A folder being renamed and the name typed so far.
+    folder_edit: Option<(usize, String)>,
+}
+
+/// What the list was asked to do, done once it is drawn.
+enum ListAction {
+    Pick(String, usize),
+    Move(String, Option<usize>),
+    Skip(usize, bool),
+    RenameFolder(usize, String),
+    RemoveFolder(usize),
 }
 
 /// One picture for the `shot` command.
@@ -138,6 +161,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
+            project: None, renaming: None, rename_to: String::new(), folder_name: String::new(), folder_edit: None,
         };
         app.select = select;
         if let Some(path) = open {
@@ -155,6 +179,11 @@ impl App {
         std::thread::spawn(move || {
             let result = catch_unwind(AssertUnwindSafe(|| match job {
                 Job::Open(path) => Done::Doc(Doc::open(&path), "Opened".into()),
+                Job::Rename(old, new) => Done::Doc(doc.expect("doc").rename(&old, &new), format!("Renamed {old} to {new}")),
+                Job::Export(left_out, to) => {
+                    let doc = doc.expect("a document to export");
+                    Done::Exported(project::export(&doc.bytes, &left_out, &to), to)
+                }
                 Job::Save => {
                     let doc = doc.expect("a document to save");
                     Done::Saved(doc.save().map(|_| doc.path.clone()))
@@ -187,7 +216,17 @@ impl App {
                         self.effect = doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&name));
                         self.emitter = 0;
                     }
+                    if let Some((old, new)) = self.renaming.take() {
+                        if let Some(project) = &mut self.project {
+                            project.rename_effect(&old, &new);
+                        }
+                    }
                     if note == "Opened" {
+                        self.project = project::project_of_eff(&doc.path).filter(|p| p.exists()).and_then(|p| Project::load(&p).ok());
+                        if let Some(project) = &mut self.project {
+                            let names: Vec<String> = doc.effects().into_iter().map(|(n, _)| n).collect();
+                            project.tidy(&names);
+                        }
                         self.borrowed.clear();
                         remember(&mut self.recent, &doc.path);
                         self.tuned = Tuned::path_for(&doc.path).map(|p| Tuned::load(&p));
@@ -210,6 +249,7 @@ impl App {
                 }
                 Done::Doc(Err(e), note) => {
                     self.busy = None;
+                    self.renaming = None;
                     self.applying.clear();
                     crate::log::note(&format!("{note} failed: {e:#}"));
                     self.status = format!("{note} failed: {e:#}");
@@ -218,6 +258,21 @@ impl App {
                     self.busy = None;
                     self.unsaved = false;
                     self.status = format!("Saved {}", path.display());
+                    if let Some(project) = &self.project {
+                        match project.save() {
+                            Ok(()) => self.status = format!("Saved {}", project.path.display()),
+                            Err(e) => self.status = format!("Saved the effects, but not the folders: {e:#}"),
+                        }
+                    }
+                }
+                Done::Exported(Ok(skipped), to) => {
+                    self.busy = None;
+                    let left = if skipped == 0 { String::new() } else { format!(", {skipped} skipped") };
+                    self.status = format!("Exported to {}{left}", to.display());
+                }
+                Done::Exported(Err(e), _) => {
+                    self.busy = None;
+                    self.status = format!("Export failed: {e:#}");
                 }
                 Done::Saved(Err(e)) => {
                     self.busy = None;
@@ -299,14 +354,88 @@ impl App {
     fn open(&mut self, path: PathBuf) {
         self.pending.clear();
         self.effect = None;
+        // a project opens its own effect file, and the project comes with it
+        let path = if project::is_project(&path) {
+            match Project::load(&path) {
+                Ok(project) => project.eff_path(),
+                Err(e) => {
+                    self.status = format!("{e:#}");
+                    return;
+                }
+            }
+        } else {
+            path
+        };
         self.run(Job::Open(path), "Opening");
+    }
+
+    /// The project buttons: start one from the open file, or save and export the open one.
+    fn project_buttons(&mut self, ui: &mut egui::Ui, ready: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(project) = self.project.clone() else {
+            if ui.add_enabled(ready, egui::Button::new("New project…"))
+                .on_hover_text("Work in a copy of this file, with its effects sorted into folders. Export puts it in the mod, or anywhere; folders marked to skip stay out.")
+                .clicked()
+            {
+                let dir = crate::scratch_dirs::app_storage_root().join("projects");
+                let _ = std::fs::create_dir_all(&dir);
+                let stem = doc.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Some(path) = rfd::FileDialog::new().add_filter("Effect Forge project", &[project::EXTENSION])
+                    .set_directory(&dir).set_file_name(format!("{stem}.{}", project::EXTENSION)).save_file()
+                {
+                    // a tuned file exports back into the file it was staged from
+                    let export_to = Tuned::is_tuned_file(&doc.path).then(|| Tuned::load(&doc.path).into).flatten()
+                        .unwrap_or_else(|| doc.path.clone());
+                    match Project::create(&path, &doc.bytes, Some(export_to)) {
+                        Ok(project) => {
+                            self.select = self.effect.as_ref().map(|e| e.0.clone());
+                            self.open(project.eff_path());
+                            self.unsaved = false;
+                        }
+                        Err(e) => self.status = format!("{e:#}"),
+                    }
+                }
+            }
+            return;
+        };
+        let left_out = project.left_out();
+        let skipping = if left_out.is_empty() { String::new() } else { format!(" Skips {} effects in folders marked to skip.", left_out.len()) };
+        if let Some(to) = project.export_to.clone() {
+            let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if ui.add_enabled(ready, egui::Button::new(format!("Export to {name}")))
+                .on_hover_text(format!("Writes {}. The first export keeps a .forge-backup of what was there.{skipping}", to.display()))
+                .clicked()
+            {
+                self.run(Job::Export(left_out.clone(), to), "Exporting");
+            }
+        }
+        if ui.add_enabled(ready, egui::Button::new("Export to…")).on_hover_text(format!("Pick where to export; the project remembers it.{skipping}")).clicked() {
+            let mut dialog = rfd::FileDialog::new().add_filter("Effect file", &["eff"]);
+            if let Some(to) = &project.export_to {
+                if let Some(dir) = to.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(name) = to.file_name() {
+                    dialog = dialog.set_file_name(name.to_string_lossy());
+                }
+            }
+            if let Some(to) = dialog.save_file() {
+                if let Some(project) = &mut self.project {
+                    project.export_to = Some(to.clone());
+                    if let Err(e) = project.save() {
+                        self.status = format!("{e:#}");
+                    }
+                }
+                self.run(Job::Export(left_out, to), "Exporting");
+            }
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let idle = self.busy.is_none();
-            if ui.add_enabled(idle, egui::Button::new("Open .eff")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Effect file", &["eff"]).pick_file() {
+            if ui.add_enabled(idle, egui::Button::new("Open")).on_hover_text("An .eff, or a project (.forge).").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Effect file or project", &["eff", project::EXTENSION]).pick_file() {
                     self.open(path);
                 }
             }
@@ -321,9 +450,15 @@ impl App {
                 });
             });
             let waiting = !self.pending.is_empty();
-            if ui.add_enabled(idle && self.doc.is_some() && self.unsaved && !waiting, egui::Button::new("Save to mod")).on_hover_text("Writes the .eff you opened. The first save keeps a .forge-backup beside it.").clicked() {
+            let (save, save_hint) = if self.project.is_some() {
+                ("Save project", "Saves the project: its effects and folders. Export puts them in the mod.")
+            } else {
+                ("Save to mod", "Writes the .eff you opened. The first save keeps a .forge-backup beside it.")
+            };
+            if ui.add_enabled(idle && self.doc.is_some() && self.unsaved && !waiting, egui::Button::new(save)).on_hover_text(save_hint).clicked() {
                 self.run(Job::Save, "Saving");
             }
+            self.project_buttons(ui, idle && !waiting && self.applying.is_empty());
             ui.separator();
             if let Some(busy) = &self.busy {
                 ui.spinner();
@@ -355,6 +490,10 @@ impl App {
             ui.checkbox(&mut self.only_tuned, format!("Only tuned ({})", tuned.effects.len()))
                 .on_hover_text("\u{2605} marks effects kept in the tuned file: rebuilds put these back over the generated ones.");
         }
+        if self.project.is_some() {
+            self.project_list(ui, &list, &filter);
+            return;
+        }
         let mut picked = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (name, set) in list.iter().filter(|(n, _)| n.to_lowercase().contains(&filter) && (!self.only_tuned || tuned.has(n))) {
@@ -369,6 +508,129 @@ impl App {
             self.effect = Some(effect);
             self.emitter = 0;
             self.preview = None;
+        }
+    }
+
+    /// A project's effects by folder. Drag an effect onto a folder to move it; a ticked folder is skipped on export.
+    fn project_list(&mut self, ui: &mut egui::Ui, list: &[(String, usize)], filter: &str) {
+        let Some(project) = self.project.clone() else { return };
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.folder_name).hint_text("folder name").desired_width(120.0));
+            if ui.add_enabled(!self.folder_name.trim().is_empty(), egui::Button::new("New folder")).clicked() {
+                if let Some(project) = &mut self.project {
+                    match project.add_folder(&self.folder_name) {
+                        Ok(()) => {
+                            self.folder_name.clear();
+                            self.unsaved = true;
+                        }
+                        Err(e) => self.status = format!("{e:#}"),
+                    }
+                }
+            }
+        });
+        let folder_names: Vec<String> = project.folders.iter().map(|f| f.name.clone()).collect();
+        let current = self.effect.as_ref().map(|e| e.0.clone());
+        let shown = |name: &String| name.to_lowercase().contains(filter);
+        let dragging = egui::DragAndDrop::has_payload_of_type::<String>(ui.ctx());
+        let mut actions = Vec::new();
+        let folder_edit = &mut self.folder_edit;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (i, folder) in project.folders.iter().enumerate() {
+                let effects: Vec<&(String, usize)> = list.iter().filter(|(n, _)| folder.effects.iter().any(|e| e.eq_ignore_ascii_case(n))).collect();
+                let dropped = drop_zone(ui, dragging, |ui| {
+                    let id = ui.make_persistent_id(("folder", i));
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                        .show_header(ui, |ui| {
+                            let mut skip = folder.is_unused();
+                            if ui.checkbox(&mut skip, "").on_hover_text("Skip on export: leaves this folder's effects out of the exported file. Adds UNUSED_ to the name.").changed() {
+                                actions.push(ListAction::Skip(i, skip));
+                            }
+                            match folder_edit {
+                                Some((at, text)) if *at == i => {
+                                    let edit = ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
+                                    if edit.lost_focus() {
+                                        if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+                                            actions.push(ListAction::RenameFolder(i, text.clone()));
+                                        }
+                                        *folder_edit = None;
+                                    } else {
+                                        edit.request_focus();
+                                    }
+                                }
+                                _ => {
+                                    let mut text = egui::RichText::new(format!("{} ({})", folder.name, effects.len())).strong();
+                                    if folder.is_unused() {
+                                        text = text.weak().strikethrough();
+                                    }
+                                    let label = ui.label(text);
+                                    let label = if folder.is_unused() { label.on_hover_text("Skipped on export") } else { label };
+                                    label.context_menu(|ui| {
+                                        if ui.button("Rename folder").clicked() {
+                                            *folder_edit = Some((i, folder.name.clone()));
+                                            ui.close();
+                                        }
+                                        if ui.button("Remove folder").on_hover_text("Its effects go back to no folder; none are deleted.").clicked() {
+                                            actions.push(ListAction::RemoveFolder(i));
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            }
+                        })
+                        .body(|ui| {
+                            for (name, set) in effects.iter().filter(|(n, _)| shown(n)) {
+                                effect_item(ui, name, *set, current.as_deref() == Some(name.as_str()), &folder_names, Some(i), &mut actions);
+                            }
+                        });
+                });
+                if let Some(name) = dropped {
+                    actions.push(ListAction::Move((*name).clone(), Some(i)));
+                }
+            }
+            let loose: Vec<&(String, usize)> = list.iter().filter(|(n, _)| project.folder_of(n).is_none()).collect();
+            let dropped = drop_zone(ui, dragging, |ui| {
+                if !project.folders.is_empty() || dragging {
+                    ui.label(egui::RichText::new(format!("Not in a folder ({})", loose.len())).strong());
+                }
+                for (name, set) in loose.iter().filter(|(n, _)| shown(n)) {
+                    effect_item(ui, name, *set, current.as_deref() == Some(name.as_str()), &folder_names, None, &mut actions);
+                }
+                if dragging {
+                    ui.weak("Drop here to take it out of its folder");
+                }
+            });
+            if let Some(name) = dropped {
+                actions.push(ListAction::Move((*name).clone(), None));
+            }
+        });
+        for action in actions {
+            match action {
+                ListAction::Pick(name, set) => {
+                    self.effect = Some((name, set));
+                    self.emitter = 0;
+                    self.preview = None;
+                }
+                other => {
+                    let Some(project) = &mut self.project else { continue };
+                    let result = match other {
+                        ListAction::Move(name, to) => {
+                            project.move_to(&name, to);
+                            Ok(())
+                        }
+                        ListAction::Skip(i, skip) => project.set_skipped(i, skip),
+                        ListAction::RenameFolder(i, name) => project.rename_folder(i, &name),
+                        ListAction::RemoveFolder(i) => {
+                            project.remove_folder(i);
+                            Ok(())
+                        }
+                        ListAction::Pick(..) => Ok(()),
+                    };
+                    match result {
+                        Ok(()) => self.unsaved = true,
+                        Err(e) => self.status = format!("{e:#}"),
+                    }
+                }
+            }
         }
     }
 
@@ -589,9 +851,46 @@ impl App {
     }
 
     fn panel_body(&mut self, ui: &mut egui::Ui, doc: &Doc, entry: &str, set_idx: usize) {
-        ui.heading(entry);
         let idle = self.busy.is_none();
-        self.tuning_row(ui, doc, entry, set_idx, idle);
+        ui.horizontal(|ui| {
+            ui.heading(entry);
+            // the tuned list keeps effects by name
+            let kept = self.tuned.as_ref().is_some_and(|t| t.has(entry));
+            let ready = idle && self.pending.is_empty() && self.applying.is_empty() && !kept;
+            ui.add_enabled_ui(ready, |ui| {
+                ui.menu_button("Rename", |ui| {
+                    if self.rename_to.is_empty() {
+                        self.rename_to = entry.to_string();
+                    }
+                    ui.add(egui::TextEdit::singleline(&mut self.rename_to).desired_width(180.0));
+                    let check = crate::engine::check_effect_name(&self.rename_to).map(str::to_string);
+                    let taken = check.as_ref().is_ok_and(|n| n != entry && doc.effects().iter().any(|(e, _)| e.eq_ignore_ascii_case(n)));
+                    match (&check, taken) {
+                        (Err(e), _) => {
+                            ui.colored_label(Color32::from_rgb(255, 190, 90), e.to_string());
+                        }
+                        (Ok(_), true) => {
+                            ui.colored_label(Color32::from_rgb(255, 190, 90), "This file already has an effect of that name.");
+                        }
+                        _ => {}
+                    }
+                    let ok = check.as_ref().is_ok_and(|n| n != entry) && !taken;
+                    if ui.add_enabled(ok, egui::Button::new("Rename")).on_hover_text("Scripts that play the effect by its old name need the new one.").clicked() {
+                        let new = check.unwrap();
+                        self.renaming = Some((entry.to_string(), new.clone()));
+                        self.select = Some(new.clone());
+                        self.rename_to.clear();
+                        self.run(Job::Rename(entry.to_string(), new), "Renaming");
+                        ui.close();
+                    }
+                })
+                .response
+                .on_disabled_hover_text(if kept { "Kept in the tuned file, which lists it by name." } else { "Wait for the values to go in." });
+            });
+        });
+        if self.project.is_none() {
+            self.tuning_row(ui, doc, entry, set_idx, idle);
+        }
         let emitters: Vec<EmitterDef> = doc.emitters(set_idx).to_vec();
         ui.horizontal(|ui| {
             ui.label("Layers");
@@ -796,11 +1095,13 @@ impl App {
         self.slider(ui, em, "emitter_static.color_scale", 0.0..=8.0, "Brightness", "Multiplies the colour. Above 1 glows; fire in Smash runs 1 to 5.");
         let cells = self.value(em, "emitter_static.tex_pattern_anim0.num").unwrap_or(0.0);
         if cells > 1.0 {
-            let mut step = self.value(em, "emitter_static.tex_pattern_anim0.frequency").unwrap_or(1.0);
-            if ui.add(egui::Slider::new(&mut step, 0.25..=8.0).logarithmic(true).text("Frames per texture step"))
-                .on_hover_text("How long each step of the texture's animation shows. Higher is slower: 2 is half speed.").changed()
+            // the file keeps frames per step; speed is its inverse
+            let step = self.value(em, "emitter_static.tex_pattern_anim0.frequency").unwrap_or(1.0).max(0.01);
+            let mut speed = 1.0 / step;
+            if ui.add(egui::Slider::new(&mut speed, 0.125..=4.0).logarithmic(true).text("Animated texture speed"))
+                .on_hover_text("How fast the texture's animation plays. 1 is the game's normal speed, 2 twice as fast, 0.5 half.").changed()
             {
-                self.set(em, "emitter_static.tex_pattern_anim0.frequency", step);
+                self.set(em, "emitter_static.tex_pattern_anim0.frequency", 1.0 / speed);
             }
         }
         let mut alpha = self.value(em, "particle_color.alpha0").unwrap_or(1.0);
@@ -958,4 +1259,42 @@ impl eframe::App for App {
         egui::Panel::right("values").default_size(360.0).show_inside(ui, |ui| self.panel(ui));
         egui::CentralPanel::default().show_inside(ui, |ui| self.view(ui));
     }
+}
+
+/// One effect in a project's list: click to show it, drag it onto a folder, or right-click to move it.
+fn effect_item(ui: &mut egui::Ui, name: &str, set: usize, on: bool, folders: &[String], in_folder: Option<usize>, actions: &mut Vec<ListAction>) {
+    let response = ui.selectable_label(on, name).interact(Sense::drag());
+    response.dnd_set_drag_payload(name.to_string());
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    if response.clicked() {
+        actions.push(ListAction::Pick(name.to_string(), set));
+    }
+    response.context_menu(|ui| {
+        ui.label("Move to");
+        for (i, folder) in folders.iter().enumerate() {
+            if Some(i) != in_folder && ui.button(folder).clicked() {
+                actions.push(ListAction::Move(name.to_string(), Some(i)));
+                ui.close();
+            }
+        }
+        if in_folder.is_some() && ui.button("No folder").clicked() {
+            actions.push(ListAction::Move(name.to_string(), None));
+            ui.close();
+        }
+    });
+}
+
+/// `add` drawn as a place to drop a dragged effect: outlined while one is over it. The effect dropped, if one was.
+fn drop_zone(ui: &mut egui::Ui, dragging: bool, add: impl FnOnce(&mut egui::Ui)) -> Option<Arc<String>> {
+    let rect = ui.scope(add).response.rect;
+    if !dragging || !ui.rect_contains_pointer(rect) {
+        return None;
+    }
+    ui.painter().rect_stroke(rect.expand(1.0), 3.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
+    if ui.input(|i| i.pointer.any_released()) {
+        return egui::DragAndDrop::take_payload::<String>(ui.ctx());
+    }
+    None
 }

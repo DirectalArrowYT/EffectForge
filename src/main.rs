@@ -7,11 +7,12 @@ mod app;
 mod engine;
 mod log;
 mod preview;
+mod project;
 mod stage;
 #[cfg(test)]
 mod tests;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     log::install();
@@ -134,6 +135,54 @@ fn main() {
                 Ok(made) => std::fs::write(out, &made.bytes).unwrap(),
                 Err(e) => {
                     eprintln!("{cmd} failed: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        ["rename", eff, out, old, new] => {
+            match engine::Doc::open(Path::new(eff)).and_then(|doc| doc.rename(old, new)) {
+                Ok(doc) => std::fs::write(out, &doc.bytes).unwrap(),
+                Err(e) => {
+                    eprintln!("rename failed: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        // A project, as the window keeps it: project <file.forge> <from.eff> [export to]
+        ["project", forge, from, rest @ ..] => {
+            let bytes = std::fs::read(from).expect("the file to start from");
+            let export_to = rest.first().map(PathBuf::from).or_else(|| Some(PathBuf::from(from)));
+            let made = project::Project::create(Path::new(forge), &bytes, export_to).unwrap();
+            println!("{} holds {}", made.path.display(), made.eff_path().display());
+            return;
+        }
+        // folder <file.forge> <folder> <effect...>: makes the folder if needed and puts the effects in it
+        ["folder", forge, folder, effects @ ..] => {
+            let mut made = project::Project::load(Path::new(forge)).unwrap();
+            let at = match made.folders.iter().position(|f| f.name.eq_ignore_ascii_case(folder)) {
+                Some(at) => at,
+                None => {
+                    made.add_folder(folder).unwrap();
+                    made.folders.len() - 1
+                }
+            };
+            for effect in effects.iter() {
+                made.move_to(effect, Some(at));
+            }
+            made.save().unwrap();
+            return;
+        }
+        // export <file.forge> [to]: as Export does, leaving out the UNUSED_ folders
+        ["export", forge, rest @ ..] => {
+            let made = project::Project::load(Path::new(forge)).unwrap();
+            let to = rest.first().map(PathBuf::from).or(made.export_to.clone()).expect("somewhere to export to");
+            let bytes = std::fs::read(made.eff_path()).unwrap();
+            match project::export(&bytes, &made.left_out(), &to) {
+                Ok(skipped) => println!("exported to {} ({skipped} left out)", to.display()),
+                Err(e) => {
+                    eprintln!("export failed: {e:#}");
                     std::process::exit(1);
                 }
             }

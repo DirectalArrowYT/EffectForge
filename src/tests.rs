@@ -564,3 +564,47 @@ fn layers_add_and_remove() {
         assert_eq!(em.attrs, doc.emitters(set)[i].attrs, "{}", em.name);
     }
 }
+
+/// A renamed effect keeps its layers and its values, and an export leaves the effects of a skipped folder empty and
+/// every other effect as it was.
+#[test]
+fn rename_and_export_skipping_a_folder() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&pit);
+    let effects = doc.effects();
+    let (old, set) = effects.iter().find(|(_, set)| doc.emitters(*set).len() > 1).cloned().expect("an effect with layers");
+    assert!(doc.rename(&old, "has space").is_err());
+    let other = &effects.iter().find(|(n, _)| *n != old).unwrap().0;
+    assert!(doc.rename(&old, other).is_err());
+    let renamed = doc.rename(&old, "forge_renamed").unwrap();
+    let found = renamed.effects().into_iter().find(|(n, _)| n == "forge_renamed").expect("the new name");
+    assert_eq!(found.1, set);
+    assert!(!renamed.effects().iter().any(|(n, _)| *n == old));
+    for (i, em) in renamed.emitters(set).iter().enumerate() {
+        assert_eq!(em.attrs, doc.emitters(set)[i].attrs, "{}", em.name);
+    }
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("forge_project_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut project = crate::project::Project::create(&dir.join("p.forge"), &renamed.bytes, Some(dir.join("out.eff"))).unwrap();
+    project.add_folder("old").unwrap();
+    project.move_to("forge_renamed", Some(0));
+    assert!(project.left_out().is_empty());
+    project.set_skipped(0, true).unwrap();
+    assert_eq!(project.folders[0].name, "UNUSED_old");
+    assert_eq!(project.left_out(), vec!["forge_renamed".to_string()]);
+    project.save().unwrap();
+    let project = crate::project::Project::load(&project.path).unwrap();
+    let skipped = crate::project::export(&std::fs::read(project.eff_path()).unwrap(), &project.left_out(), &dir.join("out.eff")).unwrap();
+    assert_eq!(skipped, 1);
+    let out = open(&dir.join("out.eff"));
+    assert!(!out.effects().iter().any(|(n, _)| n == "forge_renamed"), "the skipped effect is emptied");
+    let kept = effects.iter().find(|(n, _)| *n != old).unwrap();
+    let (_, out_set) = out.effects().into_iter().find(|(n, _)| *n == kept.0).expect("the other effects stay");
+    assert_eq!(out.emitters(out_set).len(), doc.emitters(kept.1).len());
+    let mut back = project.clone();
+    back.set_skipped(0, false).unwrap();
+    assert_eq!(back.folders[0].name, "old");
+    let _ = std::fs::remove_dir_all(&dir);
+}
