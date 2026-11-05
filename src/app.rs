@@ -39,6 +39,17 @@ enum Job {
     Stage(String, usize, PathBuf),
     /// Put the tuned file's effects into the file it was staged from.
     Merge(PathBuf, PathBuf),
+    /// Effects copied in from another .eff; replacing ones of the same name when true.
+    Import(PathBuf, Vec<String>, bool),
+}
+
+/// Effects to copy in from another file, being picked.
+struct ImportPick {
+    from: PathBuf,
+    /// Every effect in it, with whether it is picked.
+    names: Vec<(String, bool)>,
+    filter: String,
+    replace: bool,
 }
 
 enum Done {
@@ -117,6 +128,8 @@ pub struct App {
     /// A rename on its way, for the project's folders to follow once it lands.
     renaming: Option<(String, String)>,
     rename_to: String,
+    /// The import window, while open.
+    importing: Option<ImportPick>,
     folder_name: String,
     /// A folder being renamed and the name typed so far.
     folder_edit: Option<(usize, String)>,
@@ -194,7 +207,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
-            project: None, renaming: None, rename_to: String::new(), folder_name: String::new(), folder_edit: None,
+            project: None, renaming: None, rename_to: String::new(), importing: None, folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
@@ -242,6 +255,15 @@ impl App {
                         .and_then(|(bytes, _)| Ok(std::fs::write(&into, bytes)?))
                         .map(|_| Tuned::load(&tuned)),
                     format!("Tuned effects put into {}", into.display())),
+                Job::Import(from, names, replace) => {
+                    let file = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    match doc.expect("doc").import(&from, &names, replace) {
+                        Ok((doc, kept)) if kept.is_empty() => Done::Doc(Ok(doc), format!("Imported {} effects from {file}", names.len())),
+                        Ok((doc, kept)) => Done::Doc(Ok(doc), format!("Imported {} effects from {file}; kept {} already here as they were",
+                            names.len() - kept.len(), kept.len())),
+                        Err(e) => Done::Doc(Err(e), "Import".into()),
+                    }
+                }
             }));
             let _ = tx.send(result.unwrap_or_else(|panic| Done::Doc(Err(anyhow::anyhow!(panic_text(panic))), label)));
         });
@@ -550,6 +572,17 @@ impl App {
         if ui.add_enabled(can_save, egui::Button::new(save)).on_hover_text(self.save_hint()).clicked() {
             self.run(Job::Save, "Saving");
         }
+        let hint = "Copy effects from another .eff into this file, under the same names.";
+        if ui.add_enabled(idle && self.doc.is_some() && !waiting, egui::Button::new("Import effects…")).on_hover_text(hint).clicked() {
+            if let Some(from) = rfd::FileDialog::new().add_filter("Effect file", &["eff"]).pick_file() {
+                match crate::engine::effect_names(&from) {
+                    Ok(names) => {
+                        self.importing = Some(ImportPick { from, names: names.into_iter().map(|n| (n, false)).collect(), filter: String::new(), replace: false });
+                    }
+                    Err(e) => self.status = format!("{e:#}"),
+                }
+            }
+        }
         ui.separator();
         self.project_items(ui, idle && !waiting);
         ui.separator();
@@ -565,6 +598,59 @@ impl App {
                     Err(e) => self.status = format!("{e:#}"),
                 }
             }
+        }
+    }
+
+    /// The window that picks effects to copy in from another file.
+    fn import_window(&mut self, ctx: &egui::Context) {
+        let Some(pick) = &mut self.importing else { return };
+        let here: std::collections::HashSet<String> = self.doc.as_ref()
+            .map(|d| d.effects().into_iter().map(|(n, _)| n.to_ascii_lowercase()).collect())
+            .unwrap_or_default();
+        let idle = self.busy.is_none();
+        let mut open = true;
+        let mut go = false;
+        let title = format!("Import from {}", pick.from.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+        egui::Window::new(title).id(egui::Id::new("import effects")).open(&mut open).default_size([380.0, 480.0]).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                ui.text_edit_singleline(&mut pick.filter);
+            });
+            let filter = pick.filter.to_lowercase();
+            let shown = |n: &str| n.to_lowercase().contains(&filter);
+            ui.horizontal(|ui| {
+                if ui.button("Pick shown").clicked() {
+                    pick.names.iter_mut().filter(|(n, _)| shown(n)).for_each(|(_, on)| *on = true);
+                }
+                if ui.button("Pick none").clicked() {
+                    pick.names.iter_mut().for_each(|(_, on)| *on = false);
+                }
+            });
+            ui.checkbox(&mut pick.replace, "Replace effects with the same name")
+                .on_hover_text("Off: an effect this file already has is left as it is.");
+            ui.separator();
+            let count = pick.names.iter().filter(|(_, on)| *on).count();
+            ui.add_enabled_ui(idle && count > 0, |ui| {
+                go = ui.button(format!("Import {count}")).clicked();
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (name, on) in pick.names.iter_mut().filter(|(n, _)| shown(n)) {
+                    if here.contains(&name.to_ascii_lowercase()) {
+                        ui.checkbox(on, format!("{name}  (already here)"))
+                            .on_hover_text("This file has an effect by this name: it is replaced only with the box above ticked.");
+                    } else {
+                        ui.checkbox(on, name.as_str());
+                    }
+                }
+            });
+        });
+        if go {
+            let pick = self.importing.take().expect("picking");
+            let names = pick.names.into_iter().filter(|(_, on)| *on).map(|(n, _)| n).collect();
+            self.run(Job::Import(pick.from, names, pick.replace), "Importing");
+        } else if !open {
+            self.importing = None;
         }
     }
 
@@ -1491,6 +1577,7 @@ impl eframe::App for App {
         egui::Panel::left("effects").default_size(260.0).show_inside(ui, |ui| self.effect_list(ui));
         egui::Panel::right("values").default_size(360.0).show_inside(ui, |ui| self.panel(ui));
         egui::CentralPanel::default().show_inside(ui, |ui| self.view(ui));
+        self.import_window(&ctx);
     }
 }
 

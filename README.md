@@ -48,6 +48,19 @@ skipped effect keeps its name in the exported file but plays nothing, and whatev
 
 **Rename** beside the effect's name renames it (letters, digits and `_`). Scripts that play it need the new name.
 
+## Bringing effects over from another file
+
+**File > Import effects…** copies effects from another `.eff` into the open file (or project), each under its own name,
+with its textures, models and shaders. Pick the file, type in the filter (a prefix, say) and **Pick shown**, or tick
+them one by one, then **Import**. An effect the open file already has by that name is marked *(already here)* and left
+as it is unless **Replace effects with the same name** is ticked. In a project the new effects come in outside any
+folder. Nothing is written until you save.
+
+This is the way to carry new effects from a rebuilt mod file into a project made from the older one: import them
+before the next **Export**, which would otherwise write the project's older copy over the rebuilt file.
+
+From a terminal: `effect_forge import <into.eff> <from.eff> <out.eff> [replace] <EFFECT or PREFIX*>...`.
+
 ## Keeping tuned effects
 
 **Keep my tuning** copies the effect, as it is now, into the repo's tuned file:

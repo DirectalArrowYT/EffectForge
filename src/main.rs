@@ -263,6 +263,32 @@ fn main() {
         return;
     }
     let sweep = args.first().is_some_and(|a| a == "sweep");
+    // import <into.eff> <from.eff> <out.eff> [replace] <EFFECT or PREFIX*...>
+    if let ["import", into, from, out, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let replace = rest.first() == Some(&"replace");
+        let wanted = if replace { &rest[1..] } else { rest };
+        let doc = engine::Doc::open(Path::new(into)).expect("the file opens");
+        let source = engine::Doc::open(Path::new(from)).expect("the source opens");
+        let names: Vec<String> = source.effects().into_iter().map(|(n, _)| n)
+            .filter(|n| wanted.iter().any(|w| match w.strip_suffix('*') {
+                Some(prefix) => n.to_ascii_uppercase().starts_with(&prefix.to_ascii_uppercase()),
+                None => n.eq_ignore_ascii_case(w),
+            }))
+            .collect();
+        let started = std::time::Instant::now();
+        match doc.import(Path::new(from), &names, replace) {
+            Ok((doc, kept)) => {
+                std::fs::write(out, &doc.bytes).expect("writing the file");
+                println!("imported {} of {} effects in {:.1}s; kept {} already there", names.len() - kept.len(), names.len(),
+                    started.elapsed().as_secs_f32(), kept.len());
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // shot <eff> <effect> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or - for all] [camera turn] [camera tilt] [half view] [swing]
     let shot = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["shot", _, _, out, frame, rest @ ..] => Some(app::Shot {

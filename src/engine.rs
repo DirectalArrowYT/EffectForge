@@ -229,6 +229,38 @@ impl Doc {
         self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })
     }
 
+    /// Effects copied in from another file, each under its own name. One this file already has by that name is
+    /// replaced when `replace`, else left as it is. Returns the file and the names left as they were.
+    pub fn import(&self, from: &Path, effects: &[String], replace: bool) -> Result<(Self, Vec<String>)> {
+        let donor = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+        let donor_names = entry_names(&donor)?;
+        let file = from.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow!("no file name in {}", from.display()))?;
+        let mut transplants = Vec::new();
+        let mut kept = Vec::new();
+        for name in effects {
+            if !donor_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                return Err(anyhow!("{} has no effect called {name}", from.display()));
+            }
+            let here = self.loaded.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).map(|e| e.name.clone());
+            if here.is_some() && !replace {
+                kept.push(name.clone());
+                continue;
+            }
+            transplants.push(TransplantOp {
+                new_entry_name: name.clone(),
+                src_file_rel: file.to_string(),
+                src_set_name: name.clone(),
+                replace_entry: here,
+                ..Default::default()
+            });
+        }
+        if transplants.is_empty() {
+            return Ok((Self::from_bytes(self.path.clone(), self.bytes.clone())?, kept));
+        }
+        let doc = self.rebuilt_from(&EffMod { transplants, ..Default::default() }, from.parent())?;
+        Ok((doc, kept))
+    }
+
     /// The file with effect `old` renamed `new`.
     pub fn rename(&self, old: &str, new: &str) -> Result<Self> {
         let new = check_effect_name(new)?;
@@ -416,6 +448,11 @@ impl Doc {
         tuned.save()?;
         Ok(tuned)
     }
+}
+
+/// The names of the effects in an .eff on disk.
+pub fn effect_names(path: &Path) -> Result<Vec<String>> {
+    entry_names(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
 }
 
 fn entry_names(bytes: &[u8]) -> Result<Vec<String>> {
