@@ -124,6 +124,11 @@ largest side is the number beside it, **Centre** puts its middle on the layer's 
 The row shows its width, height and depth. The game's own effect models are mostly 6 to 70 across, 26 typically,
 before the layer's Size; `layers` prints each model's size.
 
+## Porting from Unreal
+
+`docs/porting.md` maps an Unreal particle emitter's modules onto Forge's fields: units, axes, which kit layer to start
+from, and the limits (16 layers, 8 keys a curve, about 2 particles a frame).
+
 ## Seeing a layer's model
 
 Under the preview, **Outline** draws a yellow line round the selected layer. **Ghost** draws the selected layer's
