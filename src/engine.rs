@@ -1175,7 +1175,7 @@ pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {
 }
 
 /// `value` in the type `like` has.
-fn typed(like: AttrValue, value: f32) -> AttrValue {
+pub fn typed(like: AttrValue, value: f32) -> AttrValue {
     match like {
         AttrValue::Float(_) => AttrValue::Float(value),
         AttrValue::Int(_) => AttrValue::Int(value as i64),

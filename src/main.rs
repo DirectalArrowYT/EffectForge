@@ -292,6 +292,35 @@ fn main() {
         }
         return;
     }
+    // value <eff> <out.eff> <EFFECT> <layer number> <id=value>...: the panel's values on one layer, applied together
+    // texture <eff> <out.eff> <EFFECT> <layer number> <png>, model <eff> <out.eff> <EFFECT> <layer number> <glb>: the
+    // Swap texture and Swap model buttons
+    if let [cmd @ ("value" | "texture" | "model"), eff, out, effect, layer, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        if !rest.is_empty() {
+            let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
+            let (entry, set_idx) = doc.find(effect).expect("the effect is in the file");
+            let layer = layer.parse::<usize>().expect("a layer number") - 1;
+            let em = doc.emitters(set_idx).get(layer).expect("that layer");
+            let target = engine::Target { entry: entry.clone(), set_idx, set_name: doc.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+                emitter_idx: layer, emitter_name: em.name.clone() };
+            let doc = match *cmd {
+                "value" => {
+                    let mut values = std::collections::BTreeMap::new();
+                    for pair in rest {
+                        let (id, v) = pair.split_once('=').expect("id=value");
+                        let like = engine::attr(em, id).unwrap_or_else(|| panic!("{} has no field {id}", em.name));
+                        values.insert(id.to_string(), engine::typed(like, v.parse().expect("a number")));
+                    }
+                    doc.apply_values(&engine::Pending::from([((set_idx, layer), values)]))
+                }
+                "texture" => doc.replace_texture(&target, Path::new(rest[0])),
+                _ => std::fs::read(rest[0]).map_err(anyhow::Error::from).and_then(|b| eff::mesh_io::from_gltf(&b))
+                    .and_then(|mesh| doc.replace_mesh(&target, &mesh)),
+            }.unwrap_or_else(|e| panic!("{cmd}: {e:#}"));
+            std::fs::write(out, &doc.bytes).expect("writing");
+            return;
+        }
+    }
     // style <eff> <out.eff> <EFFECT> <layer number> <style label> <on|off>: the Draw style boxes
     if let ["style", eff, out, effect, layer, label, on] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");

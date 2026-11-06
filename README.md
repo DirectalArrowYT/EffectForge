@@ -154,6 +154,8 @@ and fades (`src/app/recipes.json`).
 - `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>
   <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
   (the model is for **Blank model…**).
+- `effect_forge value <file.eff> <out.eff> <EFFECT> <layer number> <id=value>...` sets values on one layer as the panel
+  does; `texture <file.eff> <out.eff> <EFFECT> <layer number> <png>` and `model ... <glb>` are Swap texture and Swap model.
 - `effect_forge style <file.eff> <out.eff> <EFFECT> <layer number> <Soft edges|Rim fade|Heat haze> <on|off>` is a
   Draw style box; it prints where the shader came from and what the layer took with it.
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export
