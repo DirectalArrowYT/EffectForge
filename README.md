@@ -164,6 +164,8 @@ and fades (`src/app/recipes.json`).
   `colour` and `colour2` (`r,g,b` from 0 to 1, or `#rrggbb`; Colour 2 follows Colour while they match), `brightness`,
   `opacity`, `speed`, `over`, `glow`, `turn-x|y|z` (degrees), `spin-x|y|z` (degrees a frame) and `roll-random`
   (degrees). A layer left turning on a shader that can't turn borrows one that can. `set` alone lists the names.
+- `effect_forge ab <a.eff> <b.eff> <EFFECT> <out.png> <frame> [shot's options]` shoots the view of the same effect in
+  two files, A left and B right, and prints how much of it differs and where: to see what an edit did.
 - `effect_forge rename-layer <file.eff> <out.eff> <EFFECT> <layer number> <name>` renames a layer (right-click a layer
   in the window for the same).
 - Any command given the wrong arguments says so and stops; only a file (or nothing) opens the window.

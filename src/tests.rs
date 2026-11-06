@@ -77,31 +77,31 @@ fn borrow_gives_the_same_bytes_and_donors() {
         "flashline2: shader from effect/fighter/kirby/ef_kirby.eff / KIRBY_AIR_N / ring1",
         "flashline1a: shader from PIT_GUARDIAN_SHIELD / flashline2",
         "flashline1b: shader from PIT_GUARDIAN_SHIELD / flashline2",
-        "flashline2_add: shader from effect/system/common/ef_common.eff / SYS_REFLECTION / 3lineFlash_f; took texture_anim0.pattern_anim_type",
+        "flashline2_add: shader from effect/fighter/elight/ef_elight.eff / ELIGHT_LAY_EXPLOSION / impact1; took texture_anim0.is_scroll, combiner.color_combiner_process",
         "ring1_add: shader from effect/fighter/miifighter/ef_miifighter.eff / MIIFIGHTER_SPINKICK_FLASH / ring; took texture_anim0.pattern_anim_type, combiner.alpha_combiner_process",
         "rainbow1: already",
         "rainbow2: already",
     ]);
-    assert_eq!(fnv(&keyed.bytes), 0x67d31e67547ec959);
+    assert_eq!(fnv(&keyed.bytes), 0xd08b0ec90cf92543);
     let (stretched, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", None, "particle_data.billboard_type", 5.0).unwrap();
     assert_eq!(report, [
-        "tsubu1: shader from effect/fighter/captain/ef_captain.eff / CAPTAIN_FINAL_LINE_A / Line3; took texture_anim0.is_scroll, texture_anim0.is_scale, combiner.color_combiner_process",
+        "tsubu1: shader from effect/fighter/master/ef_master.eff / MASTER_BOW_ARROW2_SHOT / pointLight; took particle_color.color0_type, particle_fluctuation.is_applay_scale, combiner.color_combiner_process",
         "thunder1: shader from effect/fighter/captain/ef_captain.eff / CAPTAIN_FN_FLASH / line1; took texture_anim0.pattern_anim_type",
         "shield_aura: shader from effect/fighter/lucario/ef_lucario.eff / LUCARIO_FINAL_BEAM / beam_Line2",
-        "shield: shader from effect/fighter/edge/ef_edge.eff / EDGE_OCTASLASH_LINE / lightline2B",
-        "shield_light: shader from effect/fighter/krool/ef_krool.eff / KROOL_SMASH_S4 / line2_b; took texture_anim0.is_scroll, combiner.tex_alpha0_input_type, combiner.tex_alpha1_input_type, combiner.primitive_color_input_type",
+        "shield: shader from effect/fighter/buddy/ef_buddy.eff / BUDDY_FINAL_LAST_HIT / light1; took combiner.color_combiner_process",
+        "shield_light: shader from effect/fighter/krool/ef_krool.eff / KROOL_FINAL_HIT_A / impact1; took particle_color.color0_type, texture_anim0.pattern_anim_type, texture_anim0.is_scale, texture_anim1.is_scale, combiner.texture1_color_blend, combiner.tex_alpha0_input_type, combiner.primitive_color_input_type",
         "wing: shader from effect/fighter/diddy/ef_diddy.eff / DIDDY_POPGUN / muzzleflash1_back; took texture_anim1.is_scroll, combiner.texture1_color_blend, combiner.tex_alpha1_input_type",
-        "flare1_add: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_FINAL_GAUGE_MOON / line1",
-        "ring1: shader from effect/fighter/snake/ef_snake.eff / SNAKE_R5 / lightning2",
-        "flashline2: shader from effect/fighter/chrom/ef_chrom.eff / CHROM_COUNTER_SUCCESS / zigzagline1",
-        "flashline1a: shader from PIT_GUARDIAN_SHIELD / flashline2",
-        "flashline1b: shader from PIT_GUARDIAN_SHIELD / flashline2",
-        "flashline2_add: shader from effect/fighter/chrom/ef_chrom.eff / CHROM_COUNTER_SUCCESS / line1_add; took combiner.color_combiner_process",
-        "ring1_add: shader from PIT_GUARDIAN_SHIELD / flashline2_add; took texture_anim0.is_scale, combiner.color_combiner_process",
-        "rainbow1: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_BULLETCLIMAX_BULLET / line2; took texture_anim0.is_scale, combiner.color_combiner_process",
+        "flare1_add: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_MUZZLEFLASH / magic1_b",
+        "ring1: shader from PIT_GUARDIAN_SHIELD / shield; took texture_anim0.pattern_anim_type, texture_anim0.is_scale",
+        "flashline2: shader from PIT_GUARDIAN_SHIELD / shield; took texture_anim0.pattern_anim_type",
+        "flashline1a: shader from PIT_GUARDIAN_SHIELD / shield; took texture_anim0.pattern_anim_type",
+        "flashline1b: shader from PIT_GUARDIAN_SHIELD / shield; took texture_anim0.pattern_anim_type",
+        "flashline2_add: shader from effect/fighter/lucas/ef_lucas.eff / LUCAS_PKFR_BULLET_ED_MAX / light1; took particle_color.alpha0_type, texture_anim0.pattern_anim_type, combiner.color_combiner_process",
+        "ring1_add: shader from effect/system/common/ef_common.eff / SYS_NOPASSIVE / impact1; took particle_color.color0_type, texture_anim0.is_scroll",
+        "rainbow1: shader from effect/fighter/kamui/ef_kamui.eff / KAMUI_TRANSFORM_SPLASH_START / light1; took texture_anim0.is_scale, combiner.color_combiner_process",
         "rainbow2: shader from PIT_GUARDIAN_SHIELD / rainbow1; took texture_anim0.is_scale, combiner.color_combiner_process",
     ]);
-    assert_eq!(fnv(&stretched.bytes), 0xb736569d52d347f9);
+    assert_eq!(fnv(&stretched.bytes), 0xdfd5c5470e761c68);
 }
 
 /// The app sets a value first and finds the shader once it is in; that lands where a borrow straight away does.

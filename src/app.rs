@@ -128,6 +128,8 @@ pub struct App {
     /// How the next swapped-in picture becomes a texture.
     texture_from: TextureFrom,
     preview: Option<Preview>,
+    /// Where the game view was last drawn, for a shot of it alone.
+    preview_rect: Option<egui::Rect>,
     orbit: Vec2,
     search: String,
     /// An effect to pick once the file has opened.
@@ -212,6 +214,8 @@ pub struct Shot {
     pub view: f32,
     /// Move the effect round, for trails.
     pub swing: bool,
+    /// Save the game view alone, not the window.
+    pub view_only: bool,
     pub settled: u32,
 }
 
@@ -227,7 +231,7 @@ impl App {
         let mut app = Self {
             doc: None, busy: None, status: "Open an .eff file to begin.".into(), done, done_tx,
             filter: String::new(), effect: None, emitter: 0, pending: Pending::new(), applying: Pending::new(), unsaved: false, recent: read_recent(), sweep: sweep.then_some(0), edit_started: None, edit_kept: true, shot, drawn: false,
-            new_name: String::new(), create_name: String::new(), draft_mesh: None, texture_from: TextureFrom::default(), preview: None, orbit: Vec2::ZERO,
+            new_name: String::new(), create_name: String::new(), draft_mesh: None, texture_from: TextureFrom::default(), preview: None, preview_rect: None, orbit: Vec2::ZERO,
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
@@ -1197,6 +1201,7 @@ impl App {
             Ok(Some(id)) => {
                 self.drawn = true;
                 let response = ui.add(egui::Image::new((id, available)).sense(Sense::drag()));
+                self.preview_rect = Some(response.rect);
                 game.orbit += response.drag_delta() * 0.01;
                 ui.horizontal(|ui| {
                     if ui.button(if game.playing { "Pause" } else { "Play" }).clicked() {
@@ -1850,7 +1855,15 @@ impl App {
         if let Some(image) = image {
             let [width, height] = image.size;
             let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-            let saved = image::RgbaImage::from_raw(width as u32, height as u32, rgba).map(|i| i.save(&shot.out));
+            let mut whole = image::RgbaImage::from_raw(width as u32, height as u32, rgba);
+            // the view alone, for comparing two shots
+            if let (Some(image), Some(rect), true) = (whole.as_mut(), self.preview_rect, shot.view_only) {
+                let pixels = ctx.pixels_per_point();
+                let (x, y) = ((rect.min.x * pixels) as u32, (rect.min.y * pixels) as u32);
+                let (w, h) = ((rect.width() * pixels) as u32, (rect.height() * pixels) as u32);
+                whole = Some(image::imageops::crop(image, x, y, w.min(width as u32 - x), h.min(height as u32 - y)).to_image());
+            }
+            let saved = whole.map(|i| i.save(&shot.out));
             crate::log::note(&format!("shot {}: {saved:?}", shot.out.display()));
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;

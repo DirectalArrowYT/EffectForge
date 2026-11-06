@@ -436,6 +436,11 @@ fn main() {
         }
         return;
     }
+    // ab <a.eff> <b.eff> <effect> <out.png> <frame> [shot's options]: the view of each, side by side, and how much differs
+    if let ["ab", a, b, effect, out, frame, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ab(a, b, effect, out, frame, rest);
+        return;
+    }
     // shot <eff> <effect> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or - for all] [camera turn] [camera tilt] [half view] [swing]
     let shot = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["shot", eff, effect, out, frame, rest @ ..] => {
@@ -457,6 +462,7 @@ fn main() {
             orbit: [rest.get(1), rest.get(2)].map(|v| v.map_or(0.0, |v| v.parse().expect("an angle"))),
             view: rest.get(3).map_or(preview::HALF_VIEW, |v| v.parse().expect("a view size")),
             swing: rest.get(4).is_some_and(|v| *v == "swing"),
+            view_only: std::env::var_os("EFFECT_FORGE_SHOT_VIEW_ONLY").is_some(),
             settled: 0,
         })
         }
@@ -491,11 +497,69 @@ fn main() {
 }
 
 /// Every command, for the message when one doesn't match.
-const COMMANDS: [&str; 30] = [
+const COMMANDS: [&str; 31] = [
     "stage", "info", "caps", "colour2", "set", "borrow", "merge-tuned", "stage-effect", "layers", "attrs", "dump", "check",
     "trail-shaders", "style", "import", "sweep", "shot", "kit", "new-effect", "add-layer", "remove-layer",
-    "duplicate-layer", "value", "texture", "model", "rename", "rename-layer", "project", "folder", "export",
+    "duplicate-layer", "value", "texture", "model", "rename", "rename-layer", "project", "folder", "export", "ab",
 ];
+
+/// Two files' shots of an effect side by side (A left, B right), with what changed between them.
+fn ab(a: &str, b: &str, effect: &str, out: &str, frame: &str, rest: &[&str]) {
+    let exe = std::env::current_exe().unwrap_or_else(|e| fail(&format!("{e}")));
+    let shots: Vec<image::RgbaImage> = [a, b].iter().enumerate().map(|(i, eff)| {
+        let png = std::env::temp_dir().join(format!("forge_ab_{}_{i}.png", std::process::id()));
+        let mut child = std::process::Command::new(&exe)
+            .args(["shot", eff, effect, png.to_str().unwrap(), frame]).args(rest)
+            .env("EFFECT_FORGE_SHOT_VIEW_ONLY", "1")
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap_or_else(|e| fail(&format!("{e}")));
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap_or_else(|e| fail(&format!("{e}"))) {
+                break status;
+            }
+            if started.elapsed().as_secs() > 60 {
+                let _ = child.kill();
+                fail(&format!("the shot of {eff} took over a minute"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        if !status.success() {
+            let mut why = String::new();
+            use std::io::Read;
+            child.stderr.take().map(|mut e| e.read_to_string(&mut why));
+            fail(&format!("the shot of {eff}: {}", why.trim()));
+        }
+        let shot = image::open(&png).unwrap_or_else(|e| fail(&format!("the shot of {eff}: {e}"))).to_rgba8();
+        let _ = std::fs::remove_file(&png);
+        shot
+    }).collect();
+    let (left, right) = (&shots[0], &shots[1]);
+    let (w, h) = (left.width().max(right.width()), left.height().max(right.height()));
+    let mut both = image::RgbaImage::from_pixel(w * 2 + 4, h, image::Rgba([255, 255, 255, 255]));
+    image::imageops::replace(&mut both, left, 0, 0);
+    image::imageops::replace(&mut both, right, (w + 4) as i64, 0);
+    both.save(out).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
+    // what changed: pixels that differ by more than a little, and the box round them
+    let mut changed = 0usize;
+    let (mut lo, mut hi) = ((u32::MAX, u32::MAX), (0u32, 0u32));
+    for y in 0..left.height().min(right.height()) {
+        for x in 0..left.width().min(right.width()) {
+            let (p, q) = (left.get_pixel(x, y).0, right.get_pixel(x, y).0);
+            if (0..3).any(|c| p[c].abs_diff(q[c]) > 8) {
+                changed += 1;
+                lo = (lo.0.min(x), lo.1.min(y));
+                hi = (hi.0.max(x), hi.1.max(y));
+            }
+        }
+    }
+    let total = (left.width().min(right.width()) * left.height().min(right.height())).max(1) as f32;
+    if changed == 0 {
+        println!("A and B look the same");
+    } else {
+        println!("{:.1}% of the view differs, within x {}..{} y {}..{}", changed as f32 * 100.0 / total, lo.0, hi.0, lo.1, hi.1);
+    }
+}
 
 /// A command line that can't be carried out: say why and stop (never falling through to the window).
 fn fail(why: &str) -> ! {

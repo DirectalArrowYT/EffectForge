@@ -1052,6 +1052,9 @@ impl Doc {
             "sysNormalAttr" => !m.normals.is_empty(),
             _ => !m.colors.is_empty(),
         });
+        // what the shader reads from the model now (its vertex colours' fade, its normals' shading) it keeps reading
+        let kept_from_model: Vec<String> = own.inputs.iter()
+            .filter(|n| MODEL_INPUTS.iter().any(|(m, _)| m == *n) && model_has(n)).cloned().collect();
         let ids = shader_key_ids();
         let key = shader_key(em, &current);
         // what a difference costs: the places that must agree cost too much to take
@@ -1069,6 +1072,7 @@ impl Doc {
             if v.reads_birth != reads_birth || other.len() != key.len() || (!feeds_change && per_particle(&v.inputs) != inputs)
                 || (turning && !v.inputs.iter().any(|n| n == ROTATION_INPUT))
                 || v.inputs.iter().any(|n| MODEL_INPUTS.iter().any(|(m, _)| m == n) && !model_has(n))
+                || kept_from_model.iter().any(|k| !v.inputs.contains(k))
             {
                 return None;
             }
