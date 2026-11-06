@@ -193,7 +193,8 @@ and fades (`src/app/recipes.json`).
   `mirror=x|y|z`, `scale=<factor>`, `size=<largest side>`, `centre`, `ground`; the fitted size is printed.
 - `effect_forge value <file.eff> <out.eff> <EFFECT> <layer number> <id=value>...` sets values on one layer as the panel
   does; `texture <file.eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white]` and
-  `model ... <glb> [fit options]` are Swap texture and Swap model.
+  `model ... <glb> [fit options]` are Swap texture and Swap model. `texture ... second` swaps the layer's second
+  texture (**Swap texture 2…**, on layers whose shader reads two pictures, such as a picture and a mask).
 - `effect_forge style <file.eff> <out.eff> <EFFECT> <layer number> <Soft edges|Rim fade|Heat haze> <on|off>` is a
   Draw style box; it prints where the shader came from and what the layer took with it.
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export

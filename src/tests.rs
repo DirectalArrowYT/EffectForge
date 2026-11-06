@@ -218,6 +218,31 @@ fn a_renamed_layer_keeps_the_rest() {
     assert!(doc.rename_layer(&entry, set, 1, "two words").is_err());
 }
 
+/// A layer drawn with two pictures takes a new second one and keeps its first; a layer with one is told it has none.
+#[test]
+fn a_second_texture_swaps_alone() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&path);
+    let (entry, set) = doc.find("PIT_ATK_AIR_N").unwrap();
+    let target = |i: usize| engine::Target { entry: entry.clone(), set_idx: set, set_name: doc.loaded.ptcl.emitter_sets[set].name.clone(),
+        emitter_idx: i, emitter_name: doc.emitters(set)[i].name.clone() };
+    let png = std::env::temp_dir().join(format!("forge_second_{}.png", std::process::id()));
+    image::RgbaImage::from_fn(32, 32, |x, _| image::Rgba([255, 255, 255, if x < 16 { 255 } else { 0 }])).save(&png).unwrap();
+    let names = |d: &engine::Doc, i: usize| {
+        let em = &d.emitters(set)[i];
+        let name = |t: Option<u32>| t.map(|t| d.loaded.ptcl.bntx_textures[t as usize].tex_name.clone());
+        (name(em.texture_index), name(em.texture_index1))
+    };
+    let how = engine::TextureFrom { second: true, ..Default::default() };
+    let (swapped, _) = doc.replace_texture_from(&target(1), &png, how).unwrap();
+    let ((first, second), (first_now, second_now)) = (names(&doc, 1), names(&swapped, 1));
+    assert_eq!(first, first_now);
+    assert!(second_now.as_ref().is_some_and(|s| s.starts_with("forge_") && Some(s) != second.as_ref()), "{second:?} -> {second_now:?}");
+    assert!(doc.replace_texture_from(&target(0), &png, how).is_err(), "layer 1 reads one picture");
+    let _ = std::fs::remove_file(png);
+}
+
 /// Fitting a model: options apply in order, size sets the largest side, ground stands it on the origin, and a
 /// mirror keeps faces facing out.
 #[test]
@@ -262,7 +287,7 @@ fn named_values_read_and_show() {
 fn texture_shape_comes_from_the_channel_asked_for() {
     use engine::{texture_pixels, AlphaFrom, TextureFrom};
     let picture = image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba(if x == 0 { [200, 10, 0, 255] } else { [0, 90, 30, 255] }));
-    let shaped = |alpha, white| texture_pixels(picture.clone(), TextureFrom { alpha, white });
+    let shaped = |alpha, white| texture_pixels(picture.clone(), TextureFrom { alpha, white, ..Default::default() });
     let (own, notes) = shaped(AlphaFrom::Own, false);
     assert_eq!(own.as_raw(), picture.as_raw());
     assert_eq!(notes.len(), 1, "an opaque picture is pointed out");
@@ -271,7 +296,7 @@ fn texture_shape_comes_from_the_channel_asked_for() {
     assert!(notes.is_empty());
     let (bright, _) = shaped(AlphaFrom::Brightness, false);
     assert_eq!(bright.as_raw(), &[200, 10, 0, 200, 0, 90, 30, 90]);
-    let (_, notes) = texture_pixels(image::RgbaImage::new(2, 2), TextureFrom { alpha: AlphaFrom::Red, white: false });
+    let (_, notes) = texture_pixels(image::RgbaImage::new(2, 2), TextureFrom { alpha: AlphaFrom::Red, ..Default::default() });
     assert!(notes[0].contains("empty"));
     assert_eq!(AlphaFrom::parse("g"), Some(AlphaFrom::Green));
     assert_eq!(AlphaFrom::parse("lum"), Some(AlphaFrom::Brightness));

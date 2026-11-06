@@ -1567,7 +1567,13 @@ impl App {
         ui.horizontal(|ui| {
             if ui.add_enabled(idle, egui::Button::new("Swap texture…")).on_hover_text("A PNG. Its alpha gives the shape, or what shape says beside it. RGB blends between the two colours below: white is Colour, black is Colour 2.").clicked() {
                 if let (Some(png), Some(target)) = (rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file(), self.target()) {
-                    self.run(Job::Texture(target, png, self.texture_from), "Swapping the texture");
+                    self.run(Job::Texture(target, png, TextureFrom { second: false, ..self.texture_from }), "Swapping the texture");
+                }
+            }
+            if em.texture_index1.is_some() && ui.add_enabled(idle, egui::Button::new("Swap texture 2…"))
+                .on_hover_text("This layer's shader reads a second picture too, often a mask or a pattern scrolled over the first; what it does with it is up to the shader. Shape and white apply as for the first.").clicked() {
+                if let (Some(png), Some(target)) = (rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file(), self.target()) {
+                    self.run(Job::Texture(target, png, TextureFrom { second: true, ..self.texture_from }), "Swapping texture 2");
                 }
             }
             egui::ComboBox::from_id_salt("shape_from")

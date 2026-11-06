@@ -303,8 +303,12 @@ impl Doc {
     /// (no transparency anywhere, or nothing at all).
     pub fn replace_texture_from(&self, target: &Target, png: &Path, how: TextureFrom) -> Result<(Self, Vec<String>)> {
         // the usual template, else the texture the layer has now
-        let own = self.loaded.ptcl.emitter_sets.get(target.set_idx).and_then(|s| s.emitters.get(target.emitter_idx))
-            .and_then(|e| e.texture_index).and_then(|i| self.loaded.ptcl.bntx_textures.get(i as usize));
+        let layer = self.loaded.ptcl.emitter_sets.get(target.set_idx).and_then(|s| s.emitters.get(target.emitter_idx));
+        let index = layer.and_then(|e| if how.second { e.texture_index1 } else { e.texture_index });
+        if how.second && index.is_none() {
+            return Err(anyhow!("{} has no second texture: its shader reads one picture. A layer drawn with two (a picture and a mask, say) has a second one to swap", target.emitter_name));
+        }
+        let own = index.and_then(|i| self.loaded.ptcl.bntx_textures.get(i as usize));
         let template = self.loaded.ptcl.bntx_textures.iter().find(|t| t.tex_name == TEXTURE_TEMPLATE)
             .or(own.filter(|t| t.width > 0 && t.height > 0))
             .ok_or_else(|| anyhow!("this file has no {TEXTURE_TEMPLATE} texture to shape a new one on"))?;
@@ -331,7 +335,11 @@ impl Doc {
                 set_idx: target.set_idx,
                 emitter_name: target.emitter_name.clone(),
                 emitter_idx: target.emitter_idx,
-                fields: EmitterFieldEdits { texture_name: Some(name), ..Default::default() },
+                fields: if how.second {
+                    EmitterFieldEdits { texture_name1: Some(name), ..Default::default() }
+                } else {
+                    EmitterFieldEdits { texture_name: Some(name), ..Default::default() }
+                },
             }],
             ..Default::default()
         };
@@ -1340,6 +1348,8 @@ impl AlphaFrom {
 pub struct TextureFrom {
     pub alpha: AlphaFrom,
     pub white: bool,
+    /// Swap the layer's second texture (sampler 1) rather than its first.
+    pub second: bool,
 }
 
 /// `image` made into texture pixels as `how` says, with notes on a shape that won't read.

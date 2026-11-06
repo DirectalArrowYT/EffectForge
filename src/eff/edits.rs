@@ -187,6 +187,9 @@ pub struct EmitterFieldEdits {
     /// would name a different texture by then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_name: Option<String>,
+    /// The same for `sampler1`, the second texture, on emitters that have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_name1: Option<String>,
 }
 
 /// A TRANSPLANT: copy an emitter set from a donor eff into this one, either under a new entry name or replacing an

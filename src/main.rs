@@ -388,9 +388,10 @@ fn main() {
                     for option in &rest[1..] {
                         match option.split_once('=') {
                             Some(("shape", from)) => how.alpha = engine::AlphaFrom::parse(from)
-                                .unwrap_or_else(|| panic!("shape={from}: own, r, g, b or brightness")),
+                                .unwrap_or_else(|| fail(&format!("shape={from}: own, r, g, b or brightness"))),
                             None if *option == "white" => how.white = true,
-                            _ => panic!("{option}: shape=own|r|g|b|brightness or white"),
+                            None if *option == "second" => how.second = true,
+                            _ => fail(&format!("{option}: shape=own|r|g|b|brightness, white or second")),
                         }
                     }
                     doc.replace_texture_from(&target, Path::new(rest[0]), how).map(|(doc, notes)| {

@@ -9,7 +9,7 @@ pub(super) fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &Authore
     // A texture swap names the pool texture; the emitter addresses textures by GUID. Resolve
     // it here, while the descriptor table is still reachable — `sets` borrows `ptcl` mutably
     // below.
-    let swap_to = match edit.fields.texture_name.as_deref() {
+    let resolve = |name: Option<&str>| match name {
         Some(wanted) => {
             let descriptors = ptcl
                 .texture_info
@@ -30,6 +30,8 @@ pub(super) fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &Authore
         }
         None => None,
     };
+    let swap_to = resolve(edit.fields.texture_name.as_deref());
+    let swap_to1 = resolve(edit.fields.texture_name1.as_deref());
 
     let sets = &mut ptcl.emitter_list.emitter_sets;
     // Scope resolution is deliberately strict: an edit names ONE set and ONE emitter, so
@@ -101,6 +103,11 @@ pub(super) fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &Authore
             apply_fields(em, &edit.fields);
             if let Some(id) = swap_to {
                 if let Some(sampler) = em.data.sampler0.as_mut() {
+                    sampler.texture_id = id;
+                }
+            }
+            if let Some(id) = swap_to1 {
+                if let Some(sampler) = em.data.sampler1.as_mut() {
                     sampler.texture_id = id;
                 }
             }
