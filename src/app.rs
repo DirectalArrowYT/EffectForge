@@ -1439,6 +1439,12 @@ impl App {
         }
         self.trail_shader_note(ui, doc, entry, em, idle);
         self.borrowed_note(ui, em);
+        // opacity has its own warning above, read from the values being edited
+        let unseen: Vec<String> = crate::engine::why_unseen(em).into_iter().filter(|w| !w.starts_with("its opacity")).collect();
+        if !unseen.is_empty() {
+            ui.colored_label(Color32::from_rgb(255, 190, 90), format!("May not show: {}.", unseen.join("; ")))
+                .on_hover_text("Read from this layer's saved values and a run of its particles; edits not yet applied aren't counted.");
+        }
         egui::CollapsingHeader::new("Look").default_open(true).show(ui, |ui| self.look(ui, em, has_mesh, idle));
         egui::CollapsingHeader::new("Behave like...").show(ui, |ui| self.recipes(ui, em, has_mesh));
         egui::CollapsingHeader::new("When it emits").show(ui, |ui| {

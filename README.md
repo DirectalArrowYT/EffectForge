@@ -168,7 +168,9 @@ and fades (`src/app/recipes.json`).
 - `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field (only layers with that value, when one is given). An unknown id is an error naming close ones.
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge caps <file.eff> <EFFECT|*> [layer number]` prints each layer's shader: the inputs it reads and the
-  values compiled into it, and says when a layer is set to turn but its shader draws it unturned. `*` is every effect.
+  values compiled into it, and says when a layer is set to turn but its shader draws it unturned, or may show nothing
+  (no particle ever alive, size, opacity or brightness 0, black glow, stretch with no speed). `*` is every effect.
+  The panel shows the same as **May not show** above a layer's controls.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> [layer number] <field> <value>` sets a field the shader is built for on every layer of an effect (or one), borrowing a shader as the panel does, and prints whose and what else each layer took.
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
 - `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>

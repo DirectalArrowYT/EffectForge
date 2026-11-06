@@ -86,22 +86,22 @@ fn borrow_gives_the_same_bytes_and_donors() {
     let (stretched, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", None, "particle_data.billboard_type", 5.0).unwrap();
     assert_eq!(report, [
         "tsubu1: shader from effect/fighter/captain/ef_captain.eff / CAPTAIN_FINAL_LINE_A / Line3; took texture_anim0.is_scroll, texture_anim0.is_scale, combiner.color_combiner_process",
-        "thunder1: shader from effect/fighter/dedede/ef_dedede.eff / DEDEDE_JETHAMMER_HOLD / fireCenter2",
+        "thunder1: shader from effect/fighter/captain/ef_captain.eff / CAPTAIN_FN_FLASH / line1; took texture_anim0.pattern_anim_type",
         "shield_aura: shader from effect/fighter/lucario/ef_lucario.eff / LUCARIO_FINAL_BEAM / beam_Line2",
         "shield: shader from effect/fighter/edge/ef_edge.eff / EDGE_OCTASLASH_LINE / lightline2B",
         "shield_light: shader from effect/fighter/krool/ef_krool.eff / KROOL_SMASH_S4 / line2_b; took texture_anim0.is_scroll, combiner.tex_alpha0_input_type, combiner.tex_alpha1_input_type, combiner.primitive_color_input_type",
         "wing: shader from effect/fighter/diddy/ef_diddy.eff / DIDDY_POPGUN / muzzleflash1_back; took texture_anim1.is_scroll, combiner.texture1_color_blend, combiner.tex_alpha1_input_type",
         "flare1_add: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_FINAL_GAUGE_MOON / line1",
-        "ring1: shader from effect/fighter/ganon/ef_ganon.eff / GANON_MAJINKEN_FLASH / lightning1",
+        "ring1: shader from effect/fighter/snake/ef_snake.eff / SNAKE_R5 / lightning2",
         "flashline2: shader from effect/fighter/chrom/ef_chrom.eff / CHROM_COUNTER_SUCCESS / zigzagline1",
         "flashline1a: shader from PIT_GUARDIAN_SHIELD / flashline2",
         "flashline1b: shader from PIT_GUARDIAN_SHIELD / flashline2",
-        "flashline2_add: shader from effect/fighter/jack/ef_jack.eff / JACK_DOYLE_BOMB / flashLine1_f",
-        "ring1_add: shader from PIT_GUARDIAN_SHIELD / flashline2_add; took texture_anim0.is_scale",
-        "rainbow1: shader from effect/fighter/miiswordsman/ef_miiswordsman.eff / MIISWORDSMAN_ROCKET_STAB / stab3_add; took texture_anim0.is_scale",
-        "rainbow2: shader from PIT_GUARDIAN_SHIELD / rainbow1; took texture_anim0.is_scale",
+        "flashline2_add: shader from effect/fighter/chrom/ef_chrom.eff / CHROM_COUNTER_SUCCESS / line1_add; took combiner.color_combiner_process",
+        "ring1_add: shader from PIT_GUARDIAN_SHIELD / flashline2_add; took texture_anim0.is_scale, combiner.color_combiner_process",
+        "rainbow1: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_BULLETCLIMAX_BULLET / line2; took texture_anim0.is_scale, combiner.color_combiner_process",
+        "rainbow2: shader from PIT_GUARDIAN_SHIELD / rainbow1; took texture_anim0.is_scale, combiner.color_combiner_process",
     ]);
-    assert_eq!(fnv(&stretched.bytes), 0x246f4bd80bdc60a3);
+    assert_eq!(fnv(&stretched.bytes), 0xb736569d52d347f9);
 }
 
 /// The app sets a value first and finds the shader once it is in; that lands where a borrow straight away does.
@@ -179,6 +179,21 @@ fn panel_names_set_what_the_controls_set() {
     assert_eq!(set(&matching, "over", "1")["render_state.is_depth_test"], 0.0);
     assert!(panel_values(&matching, "colour", "1,0").is_err());
     assert!(panel_values(&matching, "spin-w", "1").is_err());
+}
+
+/// A game layer gives no reason it may not show; one set to opacity 0, size 0 or no life gives each.
+#[test]
+fn a_layer_that_may_not_show_says_why() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&path);
+    let (_, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
+    assert!(engine::why_unseen(&doc.emitters(set)[0]).is_empty(), "{:?}", engine::why_unseen(&doc.emitters(set)[0]));
+    let (off, _) = doc.set_values("PIT_GUARDIAN_SHIELD", Some(0), &[("particle_color.alpha0_type", "0"), ("opacity", "0"), ("size", "0"), ("emission.rate", "0")]).unwrap();
+    let why = engine::why_unseen(&off.emitters(set)[0]);
+    for reason in ["opacity is 0", "size is 0", "no particle is ever alive"] {
+        assert!(why.iter().any(|w| w.contains(reason)), "{reason} in {why:?}");
+    }
 }
 
 /// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is

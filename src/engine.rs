@@ -997,7 +997,8 @@ impl Doc {
         let per_particle = |inputs: &[String]| -> Vec<String> { inputs.iter().filter(|n| !MODEL_INPUTS.iter().any(|(m, _)| m == n)).cloned().collect() };
         let mut inputs = per_particle(&own.inputs);
         // a particle that turns is fed its start angle, which only some shaders read: without it the turn draws nothing
-        if turns(&current) && !inputs.iter().any(|n| n == ROTATION_INPUT) {
+        let turning = turns(&current);
+        if turning && !inputs.iter().any(|n| n == ROTATION_INPUT) {
             inputs.push(ROTATION_INPUT.to_string());
             inputs.sort();
         }
@@ -1027,6 +1028,7 @@ impl Doc {
         }).collect();
         let fit = |v: &Variation, other: &[i64]| -> Option<usize> {
             if v.reads_birth != reads_birth || other.len() != key.len() || (!feeds_change && per_particle(&v.inputs) != inputs)
+                || (turning && !v.inputs.iter().any(|n| n == ROTATION_INPUT))
                 || v.inputs.iter().any(|n| MODEL_INPUTS.iter().any(|(m, _)| m == n) && !model_has(n))
             {
                 return None;
@@ -1175,6 +1177,9 @@ impl Doc {
             lines.push(format!("    built for {}", built.join(" ")));
             if self.turn_ignored(em) {
                 lines.push(format!("    set to turn, but the shader doesn't read {ROTATION_INPUT}, so it draws unturned"));
+            }
+            for why in why_unseen(em) {
+                lines.push(format!("    may not show: {why}"));
             }
         }
         lines
@@ -1347,6 +1352,53 @@ pub fn panel_values(value: &dyn Fn(&str) -> Option<f32>, name: &str, text: &str)
             _ => return Err(anyhow!("{name} isn't one of the panel's names")),
         },
     })
+}
+
+/// Why a layer may show nothing, from its values and a run of its particles: empty when nothing points to it.
+/// Each reason says what to change.
+pub fn why_unseen(em: &EmitterDef) -> Vec<String> {
+    use crate::draw::sim::{spawns_moving, EmitterSim};
+    let value = |id: &str| attr(em, id).map(|v| v.as_f32()).unwrap_or(0.0);
+    let mut why = Vec::new();
+    let sim = EmitterSim::read(em);
+    // a run over the layer's whole life: start, emitting, and its last particles dying
+    let horizon = (sim.emission_start + sim.emission_duration.clamp(1.0, 300.0) + sim.life.clamp(1.0, 300.0)).min(900.0);
+    let samples: Vec<_> = (0..=48).map(|i| horizon * i as f32 / 48.0).flat_map(|t| spawns_moving(&sim, t, 1, None)).collect();
+    // a fraction a firing builds up over firings in the game, so only none at all, or no life, is certain
+    if samples.is_empty() && (sim.rate < 0.001 || sim.life < 1.0) {
+        why.push(format!("no particle is ever alive (emits {} a firing, each living {} frames, from frame {}): give it a rate and a life",
+            sim.rate, sim.life, sim.emission_start));
+    } else if value("particle_data.billboard_type") == 5.0 && samples.iter().all(|s| s.velocity.length() < 1e-7) {
+        // the game gives such layers the smallest speed (0.001) just for a direction; none at all leaves none to face
+        why.push("it stretches along its motion, but its particles have no speed of their own, so it shows only while the effect itself moves: give them some (0.001 is enough) or face the camera instead".into());
+    }
+    if ["x", "y"].iter().any(|a| value(&format!("particle_scale.scale_{a}")) == 0.0) {
+        why.push("its size is 0".into());
+    }
+    if value("emitter_static.color_scale") == 0.0 {
+        why.push("its brightness is 0, unless the move's script sets a colour".into());
+    }
+    let keyed = |which: &str| value(&format!("particle_color.{which}_type")) == 2.0;
+    let opacity: Vec<f32> = if keyed("alpha0") {
+        (0..(value("emitter_static.num_alpha0_keys") as usize).clamp(1, 8)).map(|i| value(&format!("emitter_static.alpha0.keys[{i}].x"))).collect()
+    } else {
+        vec![value("particle_color.alpha0")]
+    };
+    if opacity.iter().all(|a| *a < 0.004) {
+        why.push("its opacity is 0 all its life, unless the move's script sets one".into());
+    }
+    let black = |which: &str| -> bool {
+        if keyed(which) {
+            let keys = (value(&format!("emitter_static.num_{which}_keys")) as usize).clamp(1, 8);
+            (0..keys).all(|i| ["x", "y", "z"].iter().all(|a| value(&format!("emitter_static.{which}.keys[{i}].{a}")) < 0.004))
+        } else {
+            ["r", "g", "b"].iter().all(|c| value(&format!("particle_color.{which}_{c}")) < 0.004)
+        }
+    };
+    if value("render_state.blend_type") == 1.0 && black("color0") && black("color1") {
+        why.push("it glows (adds its colour), and its colours are black, which adds nothing".into());
+    }
+    why
 }
 
 /// The vertex input that carries a particle's start angle; a shader that doesn't read it draws every particle unturned.
