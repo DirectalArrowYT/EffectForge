@@ -4,8 +4,9 @@
 //! goldens were made with the Effect Forge exe from before the 2026-11-04 cleanup (the code Visionary first gave it),
 //! so a rewrite of the writer or the simulation has to give the same bytes as that.
 //!
-//! Files: `FORGE_TEST_PIT` (default the extracted arc's fighter/pit/ef_pit.eff) and `FORGE_TEST_COMMON`
-//! (system/common/ef_common.eff). A test whose file is missing says so and passes.
+//! Files: `FORGE_TEST_PIT` and `FORGE_TEST_COMMON`, by default `effect/fighter/pit/ef_pit.eff` and
+//! `effect/system/common/ef_common.eff` under `FORGE_GAME_ROOT` (the dumped game folder). A test whose file is
+//! missing says so and passes.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,7 +19,11 @@ use crate::eff::fields::{self, AttrValue};
 static OPEN: Mutex<()> = Mutex::new(());
 
 fn file(var: &str, default: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var(var).unwrap_or_else(|_| default.to_string()));
+    let root = || std::env::var_os("FORGE_GAME_ROOT").map(|r| PathBuf::from(r).join(default));
+    let Some(path) = std::env::var_os(var).map(PathBuf::from).or_else(root) else {
+        eprintln!("skipped: set {var} or FORGE_GAME_ROOT");
+        return None;
+    };
     if path.exists() {
         Some(path)
     } else {
@@ -28,11 +33,11 @@ fn file(var: &str, default: &str) -> Option<PathBuf> {
 }
 
 fn pit() -> Option<PathBuf> {
-    file("FORGE_TEST_PIT", "D:/Documents/SmashArc/effect/fighter/pit/ef_pit.eff")
+    file("FORGE_TEST_PIT", "effect/fighter/pit/ef_pit.eff")
 }
 
 fn common() -> Option<PathBuf> {
-    file("FORGE_TEST_COMMON", "D:/Documents/SmashArc/effect/system/common/ef_common.eff")
+    file("FORGE_TEST_COMMON", "effect/system/common/ef_common.eff")
 }
 
 fn fnv(bytes: &[u8]) -> u64 {

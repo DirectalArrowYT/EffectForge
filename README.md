@@ -183,7 +183,7 @@ and fades (`src/app/recipes.json`).
   cleanup, every other value must survive a rebuild, the particles spawned for all of ef_common are pinned by a hash, every
   shader of ef_pit must translate, recipes may only name real fields, and every piece of the kit must make an effect
   (blank pieces with only their own values, and a draw style changing only what it must). They read the extracted arc
-  (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`).
+  (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`; by default under `FORGE_GAME_ROOT`, the dumped game folder).
 
 - Crashes, GPU errors and the effect on screen go to `forge_data/forge.log` beside the executable (or under
   `EFFECT_FORGE_CACHE_DIR` when that is set).
