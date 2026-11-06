@@ -116,6 +116,14 @@ first). A layer that is already on the wrong one says so in the panel, with **Fi
 shaders** fixes every layer of the file at once. Only `shader_references.shader_index` changes. **Swing** shows a
 trail only when the shader would draw one in game.
 
+## Fitting a model
+
+Under **Swap model…**, the model row changes the layer's model (or the one just picked) before **Use this model**:
+**Turn model** X/Y/Z turns it a quarter, **Mirror** flips it, **½×** and **2×** scale it, **Fit** scales it so its
+largest side is the number beside it, **Centre** puts its middle on the layer's origin and **Ground** stands it there.
+The row shows its width, height and depth. The game's own effect models are mostly 6 to 70 across, 26 typically,
+before the layer's Size; `layers` prints each model's size.
+
 ## Seeing a layer's model
 
 Under the preview, **Outline** draws a yellow line round the selected layer. **Ghost** draws the selected layer's
@@ -181,10 +189,11 @@ and fades (`src/app/recipes.json`).
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
 - `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>
   <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
-  (the model is for **Blank model…**).
+  (the model is for **Blank model…**). After the model come fit options, applied in order: `turn-x|turn-y|turn-z=90|180|270`,
+  `mirror=x|y|z`, `scale=<factor>`, `size=<largest side>`, `centre`, `ground`; the fitted size is printed.
 - `effect_forge value <file.eff> <out.eff> <EFFECT> <layer number> <id=value>...` sets values on one layer as the panel
   does; `texture <file.eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white]` and
-  `model ... <glb>` are Swap texture and Swap model.
+  `model ... <glb> [fit options]` are Swap texture and Swap model.
 - `effect_forge style <file.eff> <out.eff> <EFFECT> <layer number> <Soft edges|Rim fade|Heat haze> <on|off>` is a
   Draw style box; it prints where the shader came from and what the layer took with it.
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export

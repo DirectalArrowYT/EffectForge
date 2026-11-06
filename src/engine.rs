@@ -879,6 +879,66 @@ pub fn mirror(mesh: &mut MeshData, axis: usize) {
     }
 }
 
+/// Grow or shrink a mesh by `factor` about its origin.
+pub fn scale_mesh(mesh: &mut MeshData, factor: f32) {
+    for p in mesh.positions.iter_mut() {
+        *p = p.map(|c| c * factor);
+    }
+}
+
+/// Move a mesh so the middle of its bounds is at the origin, or, with `on_ground`, so it stands on the origin:
+/// centred across X and Z, its lowest point at Y 0.
+pub fn centre_mesh(mesh: &mut MeshData, on_ground: bool) {
+    let (lo, hi) = mesh.bounds();
+    let mut shift: [f32; 3] = std::array::from_fn(|a| (lo[a] + hi[a]) / 2.0);
+    if on_ground {
+        shift[1] = lo[1];
+    }
+    for p in mesh.positions.iter_mut() {
+        *p = std::array::from_fn(|a| p[a] - shift[a]);
+    }
+}
+
+/// A mesh's width, height and depth.
+pub fn mesh_size(mesh: &MeshData) -> [f32; 3] {
+    let (lo, hi) = mesh.bounds();
+    std::array::from_fn(|a| hi[a] - lo[a])
+}
+
+/// The ways a model can be fitted on its way in, as the command line spells them.
+pub const MESH_OPTIONS: &str = "turn-x|turn-y|turn-z=90|180|270, mirror=x|y|z, scale=<factor>, size=<largest side>, centre, ground";
+
+/// Apply one fitting option to a mesh: `turn-y=90`, `mirror=x`, `scale=2`, `size=10` (the largest side becomes 10),
+/// `centre` (the middle at the origin) or `ground` (standing on the origin). Options apply in the order given.
+pub fn fit_mesh(mesh: &mut MeshData, option: &str) -> Result<()> {
+    let axis = |a: &str| ["x", "y", "z"].iter().position(|n| n.eq_ignore_ascii_case(a));
+    let number = |v: &str| v.parse::<f32>().ok().filter(|f| f.is_finite() && *f > 0.0);
+    let bad = || anyhow!("{option}: a model option is one of {MESH_OPTIONS}");
+    match option.split_once('=') {
+        Some((turn, degrees)) if turn.starts_with("turn-") => {
+            let a = axis(&turn[5..]).ok_or_else(bad)?;
+            let quarters = match degrees.trim().parse::<i32>().map_err(|_| bad())?.rem_euclid(360) {
+                q @ (0 | 90 | 180 | 270) => q / 90,
+                _ => return Err(anyhow!("{option}: models turn by 90, 180 or 270 degrees")),
+            };
+            (0..quarters).for_each(|_| quarter_turn(mesh, a));
+        }
+        Some(("mirror", a)) => mirror(mesh, axis(a).ok_or_else(bad)?),
+        Some(("scale", f)) => scale_mesh(mesh, number(f).ok_or_else(bad)?),
+        Some(("size", f)) => {
+            let largest = mesh_size(mesh).into_iter().fold(0.0, f32::max);
+            if largest <= 0.0 {
+                return Err(anyhow!("{option}: the model has no size to fit"));
+            }
+            scale_mesh(mesh, number(f).ok_or_else(bad)? / largest);
+        }
+        None if option.eq_ignore_ascii_case("centre") || option.eq_ignore_ascii_case("center") => centre_mesh(mesh, false),
+        None if option.eq_ignore_ascii_case("ground") => centre_mesh(mesh, true),
+        _ => return Err(bad()),
+    }
+    Ok(())
+}
+
 /// Fields the shader translator bakes in (or may: only billboard and alpha0 type are proven), so a layer can only
 /// change them by drawing with another layer's shader.
 pub const BAKED_MODES: &[&str] = &[

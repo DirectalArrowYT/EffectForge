@@ -218,6 +218,29 @@ fn a_renamed_layer_keeps_the_rest() {
     assert!(doc.rename_layer(&entry, set, 1, "two words").is_err());
 }
 
+/// Fitting a model: options apply in order, size sets the largest side, ground stands it on the origin, and a
+/// mirror keeps faces facing out.
+#[test]
+fn a_model_fits_as_asked() {
+    use crate::eff::mesh_io::MeshData;
+    let mut mesh = MeshData {
+        positions: vec![[1.0, 2.0, 3.0], [3.0, 2.0, 3.0], [1.0, 6.0, 3.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 3],
+        indices: vec![0, 1, 2],
+        ..Default::default()
+    };
+    for option in ["size=8", "ground", "turn-z=90"] {
+        engine::fit_mesh(&mut mesh, option).unwrap();
+    }
+    let size = engine::mesh_size(&mesh);
+    assert!((size[0] - 8.0).abs() < 1e-5 && (size[1] - 4.0).abs() < 1e-5, "{size:?}");
+    engine::fit_mesh(&mut mesh, "mirror=x").unwrap();
+    assert_eq!(mesh.indices, vec![0, 2, 1]);
+    for bad in ["turn-y=45", "scale=-1", "mirror=w", "huge"] {
+        assert!(engine::fit_mesh(&mut mesh, bad).is_err(), "{bad}");
+    }
+}
+
 /// A row whose values have names reads a name, its short form or a number, and shows the name with the number.
 #[test]
 fn named_values_read_and_show() {

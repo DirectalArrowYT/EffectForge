@@ -147,7 +147,7 @@ fn main() {
         return;
     }
     // Making an effect from the starter kit, as the window does; each writes <out>:
-    //   new-effect <eff> <out> <new name> <piece> [model.glb]    add-layer <eff> <out> <effect> <piece> [model.glb]
+    //   new-effect <eff> <out> <new name> <piece> [model.glb [fit options]]    add-layer <eff> <out> <effect> <piece> [model.glb [fit options]]
     //   remove-layer <eff> <out> <effect> <layer number>    duplicate-layer <eff> <out> <effect> <layer number>    kit (lists the pieces)
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["kit"] => {
@@ -156,9 +156,12 @@ fn main() {
             }
             return;
         }
-        [cmd @ ("new-effect" | "add-layer" | "remove-layer" | "duplicate-layer"), eff, out, name, what, glb @ ..] if glb.len() <= 1 => {
-            let doc = engine::Doc::open(Path::new(eff)).unwrap();
-            let model = glb.first().map(|p| eff::mesh_io::from_gltf(&std::fs::read(p).expect("the model reads")).expect("a glTF model"));
+        [cmd @ ("new-effect" | "add-layer" | "remove-layer" | "duplicate-layer"), eff, out, name, what, glb @ ..] => {
+            if matches!(*cmd, "remove-layer" | "duplicate-layer") && !glb.is_empty() {
+                fail(&format!("{cmd} takes no model: {cmd} <eff> <out> <effect> <layer number>"));
+            }
+            let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+            let model = glb.split_first().map(|(p, options)| load_model(p, options).unwrap_or_else(|e| fail(&format!("{p}: {e:#}"))));
             let piece = || engine::kit().iter().find(|p| p.name.eq_ignore_ascii_case(what)).expect("a piece of the kit (see: kit)");
             let effect = || doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).expect("that effect");
             let made = match *cmd {
@@ -254,7 +257,10 @@ fn main() {
             let Some(set) = (header.emitter_set_id as usize).checked_sub(1) else { continue };
             println!("{name} kind {:#06x} parts {} set {}", header.kind, header.variant_count, doc.loaded.ptcl.emitter_sets[set].name);
             for em in doc.emitters(set) {
-                println!("  {}{} tex {:?} mesh {:?}", "  ".repeat(em.depth as usize), em.name, tex(em.texture_index), doc.primitive_of(name, &em.name));
+                let mesh = doc.primitive_of(name, &em.name);
+                let size = mesh.and_then(|m| doc.mesh(m).ok()).map(|m| engine::mesh_size(&m))
+                    .map(|[w, h, d]| format!(" ({w:.2} × {h:.2} × {d:.2})")).unwrap_or_default();
+                println!("  {}{} tex {:?} mesh {:?}{size}", "  ".repeat(em.depth as usize), em.name, tex(em.texture_index), mesh);
             }
         }
         return;
@@ -356,14 +362,15 @@ fn main() {
         return;
     }
     // value <eff> <out.eff> <EFFECT> <layer number> <id=value>...: the panel's values on one layer, applied together
-    // texture <eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white], model <eff> <out.eff> <EFFECT> <layer number> <glb>: the
+    // texture <eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white], model <eff> <out.eff> <EFFECT> <layer number> <glb> [fit options]: the
     // Swap texture and Swap model buttons
     if let [cmd @ ("value" | "texture" | "model"), eff, out, effect, layer, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         if !rest.is_empty() {
-            let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
-            let (entry, set_idx) = doc.find(effect).expect("the effect is in the file");
-            let layer = layer.parse::<usize>().expect("a layer number") - 1;
-            let em = doc.emitters(set_idx).get(layer).expect("that layer");
+            let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+            let (entry, set_idx) = doc.find(effect).unwrap_or_else(|e| fail(&format!("{e:#}")));
+            let layer = layer.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail(&format!("layer {layer}: a number from 1"))) - 1;
+            let count = doc.emitters(set_idx).len();
+            let em = doc.emitters(set_idx).get(layer).unwrap_or_else(|| fail(&format!("{effect} has layers 1 to {count}")));
             let target = engine::Target { entry: entry.clone(), set_idx, set_name: doc.loaded.ptcl.emitter_sets[set_idx].name.clone(),
                 emitter_idx: layer, emitter_name: em.name.clone() };
             let doc = match *cmd {
@@ -393,10 +400,9 @@ fn main() {
                         doc
                     })
                 }
-                _ => std::fs::read(rest[0]).map_err(anyhow::Error::from).and_then(|b| eff::mesh_io::from_gltf(&b))
-                    .and_then(|mesh| doc.replace_mesh(&target, &mesh)),
-            }.unwrap_or_else(|e| panic!("{cmd}: {e:#}"));
-            std::fs::write(out, &doc.bytes).expect("writing");
+                _ => load_model(rest[0], &rest[1..]).and_then(|mesh| doc.replace_mesh(&target, &mesh)),
+            }.unwrap_or_else(|e| fail(&format!("{cmd}: {e:#}")));
+            std::fs::write(out, &doc.bytes).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
             return;
         }
     }
@@ -506,6 +512,18 @@ const COMMANDS: [&str; 31] = [
     "trail-shaders", "style", "import", "sweep", "shot", "kit", "new-effect", "add-layer", "remove-layer",
     "duplicate-layer", "value", "texture", "model", "rename", "rename-layer", "project", "folder", "export", "ab",
 ];
+
+/// A glTF model, fitted by each option in turn (see [`engine::MESH_OPTIONS`]), with its size printed.
+fn load_model(path: &str, options: &[&str]) -> anyhow::Result<eff::mesh_io::MeshData> {
+    let mut mesh = eff::mesh_io::from_gltf(&std::fs::read(path)?)?;
+    for option in options {
+        engine::fit_mesh(&mut mesh, option)?;
+    }
+    let [w, h, d] = engine::mesh_size(&mesh);
+    let (lo, hi) = mesh.bounds();
+    println!("model {w:.2} wide, {h:.2} high, {d:.2} deep; from {lo:.2?} to {hi:.2?}");
+    Ok(mesh)
+}
 
 /// Two files' shots of an effect side by side (A left, B right), with what changed between them.
 fn ab(a: &str, b: &str, effect: &str, out: &str, frame: &str, rest: &[&str]) {

@@ -125,6 +125,8 @@ pub struct App {
     create_name: String,
     /// The model being turned or newly loaded, not yet applied.
     draft_mesh: Option<MeshData>,
+    /// The largest side the Fit button scales a model to.
+    fit_size: f32,
     /// How the next swapped-in picture becomes a texture.
     texture_from: TextureFrom,
     preview: Option<Preview>,
@@ -231,7 +233,7 @@ impl App {
         let mut app = Self {
             doc: None, busy: None, status: "Open an .eff file to begin.".into(), done, done_tx,
             filter: String::new(), effect: None, emitter: 0, pending: Pending::new(), applying: Pending::new(), unsaved: false, recent: read_recent(), sweep: sweep.then_some(0), edit_started: None, edit_kept: true, shot, drawn: false,
-            new_name: String::new(), create_name: String::new(), draft_mesh: None, texture_from: TextureFrom::default(), preview: None, preview_rect: None, orbit: Vec2::ZERO,
+            new_name: String::new(), create_name: String::new(), draft_mesh: None, fit_size: 20.0, texture_from: TextureFrom::default(), preview: None, preview_rect: None, orbit: Vec2::ZERO,
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
@@ -1610,6 +1612,40 @@ impl App {
                         if let Some(mesh) = &mut self.draft_mesh {
                             mirror(mesh, axis);
                         }
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                // what the buttons change: the model being fitted, or a copy of the layer's own
+                let shown = self.draft_mesh.as_ref().or(self.preview.as_ref().and_then(|p| p.mesh.as_ref()));
+                if let Some(mesh) = shown {
+                    let [w, h, d] = crate::engine::mesh_size(mesh);
+                    ui.label(format!("Model {w:.2} × {h:.2} × {d:.2}")).on_hover_text("Width, height and depth, before the layer's Size.");
+                }
+                let mut fit: Option<Box<dyn Fn(&mut MeshData)>> = None;
+                if ui.small_button("½×").on_hover_text("Half as big").clicked() {
+                    fit = Some(Box::new(|m| crate::engine::scale_mesh(m, 0.5)));
+                }
+                if ui.small_button("2×").on_hover_text("Twice as big").clicked() {
+                    fit = Some(Box::new(|m| crate::engine::scale_mesh(m, 2.0)));
+                }
+                ui.add(egui::DragValue::new(&mut self.fit_size).range(0.01..=1000.0).speed(0.1));
+                let size = self.fit_size;
+                if ui.small_button("Fit").on_hover_text("Scale it so its largest side is this long. The game's own effect models are mostly 6 to 70 across, 26 typically, before the layer's Size").clicked() {
+                    fit = Some(Box::new(move |m| { let _ = crate::engine::fit_mesh(m, &format!("size={size}")); }));
+                }
+                if ui.small_button("Centre").on_hover_text("Move its middle to the layer's origin").clicked() {
+                    fit = Some(Box::new(|m| crate::engine::centre_mesh(m, false)));
+                }
+                if ui.small_button("Ground").on_hover_text("Stand it on the layer's origin: centred across, its lowest point at 0").clicked() {
+                    fit = Some(Box::new(|m| crate::engine::centre_mesh(m, true)));
+                }
+                if let Some(fit) = fit {
+                    if self.draft_mesh.is_none() {
+                        self.draft_mesh = self.preview.as_ref().and_then(|p| p.mesh.clone());
+                    }
+                    if let Some(mesh) = &mut self.draft_mesh {
+                        fit(mesh);
                     }
                 }
                 if self.draft_mesh.is_some() && ui.add_enabled(idle, egui::Button::new("Use this model")).clicked() {
