@@ -522,6 +522,17 @@ impl App {
         [&self.pending, &self.applying].iter().find_map(|p| p.get(&key).and_then(|p| p.get(id)).copied()).or_else(|| attr(em, id)).map(|v| v.as_f32())
     }
 
+    /// Colour 2 (where the texture's RGB is dark) as one fixed colour.
+    fn set_colour2(&mut self, em: &EmitterDef, rgb: [f32; 3]) {
+        for (i, (channel, axis)) in [("r", "x"), ("g", "y"), ("b", "z")].into_iter().enumerate() {
+            self.set(em, &format!("particle_color.color1_{channel}"), rgb[i]);
+            self.set(em, &format!("emitter_static.color1.keys[0].{axis}"), rgb[i]);
+        }
+        // A shader built for animated colour reads every key, and a fixed colour leaves the rest black.
+        self.set(em, "particle_color.color1_type", 2.0);
+        self.set(em, "emitter_static.num_color1_keys", 1.0);
+    }
+
     fn set(&mut self, em: &EmitterDef, id: &str, value: f32) {
         let Some(old) = attr(em, id) else { return };
         let new = match old {
@@ -1561,10 +1572,19 @@ impl App {
         self.slider(ui, em, "particle_scale.scale_random_x", 0.0..=100.0, "Size varies by %", "Each particle is up to this much smaller.")
             .map(|v| ["y", "z"].map(|a| self.set(em, &format!("particle_scale.scale_random_{a}"), v)));
         let ids = ["particle_color.color0_r", "particle_color.color0_g", "particle_color.color0_b"];
+        let ids2 = ["particle_color.color1_r", "particle_color.color1_g", "particle_color.color1_b"];
         let mut rgb = [0, 1, 2].map(|i| self.value(em, ids[i]).unwrap_or(1.0));
+        // the same two colours are one colour: Colour 2 goes along until it is set apart
+        let together = (0..3).all(|i| (self.value(em, ids2[i]).unwrap_or(1.0) - rgb[i]).abs() < 1e-3);
         ui.horizontal(|ui| {
             ui.label("Colour");
-            let changed = ui.color_edit_button_rgb(&mut rgb).changed();
+            let changed = ui.color_edit_button_rgb(&mut rgb)
+                .on_hover_text(if together {
+                    "Where the texture's RGB is bright. Colour 2 is the same, so it changes with this until you set it apart."
+                } else {
+                    "Where the texture's RGB is bright."
+                })
+                .changed();
             let single = self.value(em, "emitter_static.num_color0_keys").unwrap_or(1.0) <= 1.0;
             if !single {
                 ui.label("(changes over its life: edit under All values)");
@@ -1574,20 +1594,18 @@ impl App {
                     self.set(em, ids[i], rgb[i]);
                     self.set(em, &format!("emitter_static.color0.keys[0].{axis}"), rgb[i]);
                 }
+                if together {
+                    self.set_colour2(em, rgb);
+                }
             }
         });
-        let ids = ["particle_color.color1_r", "particle_color.color1_g", "particle_color.color1_b"];
-        let mut rgb = [0, 1, 2].map(|i| self.value(em, ids[i]).unwrap_or(1.0));
+        let mut rgb = [0, 1, 2].map(|i| self.value(em, ids2[i]).unwrap_or(1.0));
         ui.horizontal(|ui| {
             ui.label("Colour 2");
-            if ui.color_edit_button_rgb(&mut rgb).on_hover_text("Where the texture's RGB is dark.").changed() {
-                for (i, axis) in ["x", "y", "z"].iter().enumerate() {
-                    self.set(em, ids[i], rgb[i]);
-                    self.set(em, &format!("emitter_static.color1.keys[0].{axis}"), rgb[i]);
-                }
-                // A shader built for animated colour reads every key, and a fixed colour leaves the rest black.
-                self.set(em, "particle_color.color1_type", 2.0);
-                self.set(em, "emitter_static.num_color1_keys", 1.0);
+            if ui.color_edit_button_rgb(&mut rgb).on_hover_text("Where the texture's RGB is dark (a soft sprite's edge). \
+                A white texture never shows it.").changed()
+            {
+                self.set_colour2(em, rgb);
             }
         });
         self.slider(ui, em, "emitter_static.color_scale", 0.0..=8.0, "Brightness", "Multiplies the colour. Above 1 glows; fire in Smash runs 1 to 5.");

@@ -43,7 +43,9 @@ normals gets smooth ones from its faces.
 
 Beside **Swap texture…**, **shape** says where the picture's shape (alpha) comes from: its alpha, one colour channel
 (effect textures often pack a mask in each of red, green and blue), or its brightness (a glow drawn on black with no
-alpha). **white** drops the picture's colour so the layer's colours alone tint it. A picture whose shape is solid
+alpha). **white** drops the picture's colour so the layer's colours alone tint it. **Colour** tints where the
+texture's RGB is bright and **Colour 2** where it is dark (a soft sprite's edge); while the two are the same, Colour 2
+changes with Colour. A picture whose shape is solid
 everywhere, or empty, is still swapped in, and the status line says so.
 
 ### Draw style
