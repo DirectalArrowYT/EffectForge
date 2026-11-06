@@ -296,6 +296,12 @@ impl Doc {
     }
 
     pub fn replace_texture(&self, target: &Target, png: &Path) -> Result<Self> {
+        Ok(self.replace_texture_from(target, png, TextureFrom::default())?.0)
+    }
+
+    /// The layer's texture swapped for a picture made into one as `how` says, with notes on a shape that won't read
+    /// (no transparency anywhere, or nothing at all).
+    pub fn replace_texture_from(&self, target: &Target, png: &Path, how: TextureFrom) -> Result<(Self, Vec<String>)> {
         // the usual template, else the texture the layer has now
         let own = self.loaded.ptcl.emitter_sets.get(target.set_idx).and_then(|s| s.emitters.get(target.emitter_idx))
             .and_then(|e| e.texture_index).and_then(|i| self.loaded.ptcl.bntx_textures.get(i as usize));
@@ -304,7 +310,9 @@ impl Doc {
             .ok_or_else(|| anyhow!("this file has no {TEXTURE_TEMPLATE} texture to shape a new one on"))?;
         // A pool texture must match its template's size.
         let source = image::open(png).with_context(|| format!("reading {}", png.display()))?;
-        let fitted = source.resize_exact(template.width, template.height, image::imageops::FilterType::Triangle).to_rgba8();
+        let (shaped, notes) = texture_pixels(source.to_rgba8(), how);
+        let fitted = image::DynamicImage::ImageRgba8(shaped)
+            .resize_exact(template.width, template.height, image::imageops::FilterType::Triangle).to_rgba8();
         let name = format!("forge_{}_{}", clean(&target.entry), clean(&target.emitter_name));
         let name = crate::eff::textures::unique_texture_name(
             &self.loaded.ptcl.bntx_textures.iter().map(|t| t.tex_name.clone()).collect::<Vec<_>>(), &name);
@@ -327,7 +335,7 @@ impl Doc {
             }],
             ..Default::default()
         };
-        self.rebuilt(&eff)
+        Ok((self.rebuilt(&eff)?, notes))
     }
 
     /// Give the emitter its own copy of `mesh`, under a primitive of its own.
@@ -1144,6 +1152,73 @@ impl Doc {
         }
     }
 
+}
+
+/// Where a swapped-in picture's shape (its alpha) comes from. Effect textures often keep a shape in one colour
+/// channel, several to a file, or draw on black with no alpha at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AlphaFrom {
+    #[default]
+    Own,
+    Red,
+    Green,
+    Blue,
+    /// The brightest of red, green and blue: a glow drawn on black.
+    Brightness,
+}
+
+impl AlphaFrom {
+    pub const ALL: [(AlphaFrom, &'static str); 5] = [
+        (AlphaFrom::Own, "its alpha"), (AlphaFrom::Red, "red"), (AlphaFrom::Green, "green"), (AlphaFrom::Blue, "blue"),
+        (AlphaFrom::Brightness, "brightness"),
+    ];
+
+    /// `own`, `r`, `g`, `b` or `brightness` (or a label).
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.to_ascii_lowercase().as_str() {
+            "own" | "alpha" | "a" | "its alpha" => Some(AlphaFrom::Own),
+            "r" | "red" => Some(AlphaFrom::Red),
+            "g" | "green" => Some(AlphaFrom::Green),
+            "b" | "blue" => Some(AlphaFrom::Blue),
+            "brightness" | "lum" | "max" => Some(AlphaFrom::Brightness),
+            _ => None,
+        }
+    }
+}
+
+/// How a picture becomes a layer's texture: where its shape comes from, and whether its colour gives way to white so
+/// the layer's colours alone tint it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextureFrom {
+    pub alpha: AlphaFrom,
+    pub white: bool,
+}
+
+/// `image` made into texture pixels as `how` says, with notes on a shape that won't read.
+pub fn texture_pixels(mut image: image::RgbaImage, how: TextureFrom) -> (image::RgbaImage, Vec<String>) {
+    for p in image.pixels_mut() {
+        let [r, g, b, a] = p.0;
+        let alpha = match how.alpha {
+            AlphaFrom::Own => a,
+            AlphaFrom::Red => r,
+            AlphaFrom::Green => g,
+            AlphaFrom::Blue => b,
+            AlphaFrom::Brightness => r.max(g).max(b),
+        };
+        p.0 = if how.white { [255, 255, 255, alpha] } else { [r, g, b, alpha] };
+    }
+    let (low, high) = image.pixels().fold((255u8, 0u8), |(lo, hi), p| (lo.min(p.0[3]), hi.max(p.0[3])));
+    let mut notes = Vec::new();
+    if high < 8 {
+        notes.push("its shape is empty, so the layer draws nothing: take the shape from another channel".to_string());
+    } else if low >= 250 {
+        notes.push(if how.alpha == AlphaFrom::Own {
+            "it has no transparency, so the whole square draws: take the shape from a colour channel or its brightness"
+        } else {
+            "that channel is solid everywhere, so the whole square draws"
+        }.to_string());
+    }
+    (image, notes)
 }
 
 pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {

@@ -13,7 +13,7 @@ use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, TextureHandle, Textu
 use crate::eff::fields::AttrValue;
 use crate::eff::mesh_io::{self, MeshData};
 use crate::eff::model::EmitterDef;
-use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned, STYLES};
+use crate::engine::{attr, game_root, kit, AlphaFrom, TextureFrom, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned, STYLES};
 use crate::preview::Preview as GamePreview;
 use crate::project::{self, Project};
 use crate::settings::{Settings, Theme};
@@ -21,7 +21,7 @@ use crate::settings::{Settings, Theme};
 enum Job {
     Open(PathBuf),
     Values(Pending),
-    Texture(Target, PathBuf),
+    Texture(Target, PathBuf, TextureFrom),
     Mesh(Target, MeshData),
     Duplicate(String, usize, String),
     /// A new effect of this name from a piece of the kit.
@@ -124,6 +124,8 @@ pub struct App {
     create_name: String,
     /// The model being turned or newly loaded, not yet applied.
     draft_mesh: Option<MeshData>,
+    /// How the next swapped-in picture becomes a texture.
+    texture_from: TextureFrom,
     preview: Option<Preview>,
     orbit: Vec2,
     search: String,
@@ -221,7 +223,7 @@ impl App {
         let mut app = Self {
             doc: None, busy: None, status: "Open an .eff file to begin.".into(), done, done_tx,
             filter: String::new(), effect: None, emitter: 0, pending: Pending::new(), applying: Pending::new(), unsaved: false, recent: read_recent(), sweep: sweep.then_some(0), edit_started: None, edit_kept: true, shot, drawn: false,
-            new_name: String::new(), create_name: String::new(), draft_mesh: None, preview: None, orbit: Vec2::ZERO,
+            new_name: String::new(), create_name: String::new(), draft_mesh: None, texture_from: TextureFrom::default(), preview: None, orbit: Vec2::ZERO,
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
@@ -262,7 +264,11 @@ impl App {
                     Done::Saved(doc.save().map(|_| doc.path.clone()))
                 }
                 Job::Values(pending) => Done::Doc(doc.expect("doc").apply_values(&pending), "Applied".into()),
-                Job::Texture(target, png) => Done::Doc(doc.expect("doc").replace_texture(&target, &png), "Texture swapped".into()),
+                Job::Texture(target, png, how) => match doc.expect("doc").replace_texture_from(&target, &png, how) {
+                    Ok((doc, notes)) if notes.is_empty() => Done::Doc(Ok(doc), "Texture swapped".into()),
+                    Ok((doc, notes)) => Done::Doc(Ok(doc), format!("Texture swapped, but {}", notes.join("; "))),
+                    Err(e) => Done::Doc(Err(e), "Swapping the texture".into()),
+                },
                 Job::Mesh(target, mesh) => Done::Doc(doc.expect("doc").replace_mesh(&target, &mesh), "Model swapped".into()),
                 Job::Duplicate(entry, set, name) => Done::Doc(doc.expect("doc").duplicate(&entry, set, &name), format!("Duplicated as {name}")),
                 Job::NewEffect(name, piece, model) => Done::Doc(doc.expect("doc").new_effect(&name, piece, model.as_ref()),
@@ -1489,11 +1495,22 @@ impl App {
 
     fn look(&mut self, ui: &mut egui::Ui, em: &EmitterDef, has_mesh: bool, idle: bool) {
         ui.horizontal(|ui| {
-            if ui.add_enabled(idle, egui::Button::new("Swap texture…")).on_hover_text("A PNG. Alpha gives the shape. RGB blends between the two colours below: white is Colour, black is Colour 2.").clicked() {
+            if ui.add_enabled(idle, egui::Button::new("Swap texture…")).on_hover_text("A PNG. Its alpha gives the shape, or what shape says beside it. RGB blends between the two colours below: white is Colour, black is Colour 2.").clicked() {
                 if let (Some(png), Some(target)) = (rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file(), self.target()) {
-                    self.run(Job::Texture(target, png), "Swapping the texture");
+                    self.run(Job::Texture(target, png, self.texture_from), "Swapping the texture");
                 }
             }
+            egui::ComboBox::from_id_salt("shape_from")
+                .selected_text(format!("shape: {}", AlphaFrom::ALL.iter().find(|(a, _)| *a == self.texture_from.alpha).map_or("", |(_, l)| *l)))
+                .show_ui(ui, |ui| {
+                    for (alpha, label) in AlphaFrom::ALL {
+                        ui.selectable_value(&mut self.texture_from.alpha, alpha, label);
+                    }
+                })
+                .response.on_hover_text("Where the next swapped-in picture's shape comes from: its alpha, one colour \
+                    channel (textures often keep a mask in each), or its brightness (a glow drawn on black).");
+            ui.checkbox(&mut self.texture_from.white, "white").on_hover_text("Drop the picture's colour for white, so the \
+                layer's colours alone tint it. For masks and greyscale shapes.");
             if ui.add_enabled(idle && has_mesh, egui::Button::new("Swap model…")).on_hover_text("A .glb. Sprite layers have no model to swap.").clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("glTF model", &["glb", "gltf"]).pick_file() {
                     match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| mesh_io::from_gltf(&b)) {

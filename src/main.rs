@@ -299,7 +299,7 @@ fn main() {
         return;
     }
     // value <eff> <out.eff> <EFFECT> <layer number> <id=value>...: the panel's values on one layer, applied together
-    // texture <eff> <out.eff> <EFFECT> <layer number> <png>, model <eff> <out.eff> <EFFECT> <layer number> <glb>: the
+    // texture <eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white], model <eff> <out.eff> <EFFECT> <layer number> <glb>: the
     // Swap texture and Swap model buttons
     if let [cmd @ ("value" | "texture" | "model"), eff, out, effect, layer, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         if !rest.is_empty() {
@@ -319,7 +319,23 @@ fn main() {
                     }
                     doc.apply_values(&engine::Pending::from([((set_idx, layer), values)]))
                 }
-                "texture" => doc.replace_texture(&target, Path::new(rest[0])),
+                "texture" => {
+                    let mut how = engine::TextureFrom::default();
+                    for option in &rest[1..] {
+                        match option.split_once('=') {
+                            Some(("shape", from)) => how.alpha = engine::AlphaFrom::parse(from)
+                                .unwrap_or_else(|| panic!("shape={from}: own, r, g, b or brightness")),
+                            None if *option == "white" => how.white = true,
+                            _ => panic!("{option}: shape=own|r|g|b|brightness or white"),
+                        }
+                    }
+                    doc.replace_texture_from(&target, Path::new(rest[0]), how).map(|(doc, notes)| {
+                        for note in notes {
+                            println!("{note}");
+                        }
+                        doc
+                    })
+                }
                 _ => std::fs::read(rest[0]).map_err(anyhow::Error::from).and_then(|b| eff::mesh_io::from_gltf(&b))
                     .and_then(|mesh| doc.replace_mesh(&target, &mesh)),
             }.unwrap_or_else(|e| panic!("{cmd}: {e:#}"));

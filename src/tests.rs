@@ -129,6 +129,28 @@ fn values_then_reshade_matches_a_borrow() {
     }
 }
 
+/// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is
+/// solid or empty is pointed out.
+#[test]
+fn texture_shape_comes_from_the_channel_asked_for() {
+    use engine::{texture_pixels, AlphaFrom, TextureFrom};
+    let picture = image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba(if x == 0 { [200, 10, 0, 255] } else { [0, 90, 30, 255] }));
+    let shaped = |alpha, white| texture_pixels(picture.clone(), TextureFrom { alpha, white });
+    let (own, notes) = shaped(AlphaFrom::Own, false);
+    assert_eq!(own.as_raw(), picture.as_raw());
+    assert_eq!(notes.len(), 1, "an opaque picture is pointed out");
+    let (green, notes) = shaped(AlphaFrom::Green, true);
+    assert_eq!(green.as_raw(), &[255, 255, 255, 10, 255, 255, 255, 90]);
+    assert!(notes.is_empty());
+    let (bright, _) = shaped(AlphaFrom::Brightness, false);
+    assert_eq!(bright.as_raw(), &[200, 10, 0, 200, 0, 90, 30, 90]);
+    let (_, notes) = texture_pixels(image::RgbaImage::new(2, 2), TextureFrom { alpha: AlphaFrom::Red, white: false });
+    assert!(notes[0].contains("empty"));
+    assert_eq!(AlphaFrom::parse("g"), Some(AlphaFrom::Green));
+    assert_eq!(AlphaFrom::parse("lum"), Some(AlphaFrom::Brightness));
+    assert_eq!(AlphaFrom::parse("q"), None);
+}
+
 /// Every value of every layer reads back as written after a rebuild that changes one of them.
 #[test]
 fn a_rebuild_keeps_every_other_value() {

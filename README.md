@@ -41,6 +41,11 @@ texture). Either is one particle, still, white, full size, living 60 frames, wit
 from there: **Swap texture…**, the colours, **Over their life**, **When it emits** and the rest. A model without
 normals gets smooth ones from its faces.
 
+Beside **Swap texture…**, **shape** says where the picture's shape (alpha) comes from: its alpha, one colour channel
+(effect textures often pack a mask in each of red, green and blue), or its brightness (a glow drawn on black with no
+alpha). **white** drops the picture's colour so the layer's colours alone tint it. A picture whose shape is solid
+everywhere, or empty, is still swapped in, and the status line says so.
+
 ### Draw style
 
 Under **Look**, **Draw style** switches what is compiled into the layer's shader:
@@ -159,7 +164,8 @@ and fades (`src/app/recipes.json`).
   <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
   (the model is for **Blank model…**).
 - `effect_forge value <file.eff> <out.eff> <EFFECT> <layer number> <id=value>...` sets values on one layer as the panel
-  does; `texture <file.eff> <out.eff> <EFFECT> <layer number> <png>` and `model ... <glb>` are Swap texture and Swap model.
+  does; `texture <file.eff> <out.eff> <EFFECT> <layer number> <png> [shape=own|r|g|b|brightness] [white]` and
+  `model ... <glb>` are Swap texture and Swap model.
 - `effect_forge style <file.eff> <out.eff> <EFFECT> <layer number> <Soft edges|Rim fade|Heat haze> <on|off>` is a
   Draw style box; it prints where the shader came from and what the layer took with it.
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export
