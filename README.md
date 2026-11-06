@@ -39,7 +39,20 @@ The first two pieces of the kit start from nothing in particular: **Blank sprite
 and **Blank model…** (asks for a `.glb` straight away and draws it as it is, in world orientation, with a plain white
 texture). Either is one particle, still, white, full size, living 60 frames, with no fade, spin or drift. Build it up
 from there: **Swap texture…**, the colours, **Over their life**, **When it emits** and the rest. A model without
-normals gets smooth ones from its faces.
+normals gets smooth ones from its faces. The layer is named `sprite` or `model` (then `_2`, ...).
+
+What a blank starts with:
+
+| | Blank sprite | Blank model |
+|---|---|---|
+| Size | 10: a sprite's size is its full width | 1: the model's own size |
+| Facing (billboard) | 0, faces the camera | 3, drawn as it is, turned only by the layer |
+| Texture wrap | Repeat | Repeat |
+| Motion | direction (0, 1, 0) at speed 0, no spin, no gravity | the same |
+| Life | 60 frames, one particle, one time | the same |
+| Colour, opacity | white, 1, fixed (no keys) | the same |
+
+Key times on every curve run from 0 (birth) to 1 (death).
 
 Beside **Swap texture…**, **shape** says where the picture's shape (alpha) comes from: its alpha, one colour channel
 (effect textures often pack a mask in each of red, green and blue), or its brightness (a glow drawn on black with no
@@ -175,19 +188,27 @@ and fades (`src/app/recipes.json`).
 - `effect_forge set <file.eff> <out.eff> <EFFECT> [layer number] <name=value>...` sets values on one layer or all of
   them. A name is a field id or one of the panel's controls, which set what the control sets: `size`, `size-varies`,
   `colour` and `colour2` (`r,g,b` from 0 to 1, or `#rrggbb`; Colour 2 follows Colour while they match), `brightness`,
-  `opacity`, `speed`, `over`, `glow`, `turn-x|y|z` (degrees), `spin-x|y|z` (degrees a frame) and `roll-random`
-  (degrees). A layer left turning on a shader that can't turn borrows one that can. `set` alone lists the names.
+  `opacity`, `speed`, `over`, `glow`, `turn-x|y|z` (degrees), `spin-x|y|z` (degrees a frame), `roll-random`
+  (degrees), and curves over life as `time:value` keys, time 0 (birth) to 1 (death), up to 8:
+  `fade=0:0,0.1:1,1:0`, `size-keys=0:0.2,1:1.5` (or `time:x/y/z`) and `colour-keys=0:#ffffff,1:#2040ff`. A value
+  compiled into the shader (billboard, fade or colour type, ...) moves the layer onto a shader built for it, and a
+  layer left turning on a shader that can't turn borrows one that can; the report names whose. `set` with no names
+  lists them.
 - `effect_forge ab <a.eff> <b.eff> <EFFECT> <out.png> <frame> [shot's options]` shoots the view of the same effect in
   two files, A left and B right, and prints how much of it differs and where: to see what an edit did.
+  `<A_NAME>=<B_NAME>` compares two effects with different names (the same file twice works too).
 - `effect_forge rename-layer <file.eff> <out.eff> <EFFECT> <layer number> <name>` renames a layer (right-click a layer
   in the window for the same).
 - Any command given the wrong arguments says so and stops; only a file (or nothing) opens the window.
-- `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field (only layers with that value, when one is given). An unknown id is an error naming close ones.
+- `effect_forge attrs <file.eff> <id,id,...> [EFFECT [layer number]] [id=value]` prints values across a whole file
+  (or one effect, or one layer of it), to see how the game's own effects use a field (only layers with that value,
+  when one is given). An unknown id is an error naming close ones.
   Fields whose values have names (blend type, follow type, volume type, arc type, latitude direction, the colour
   types, wrap modes) print the name after the number, and `set` takes the name (`render_state.blend_type=glow`).
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge caps <file.eff> <EFFECT|*> [layer number]` prints each layer's shader: the inputs it reads and the
-  values compiled into it, and says when a layer is set to turn but its shader draws it unturned, or may show nothing
+  values compiled into it, and says when a layer is set to turn but its shader draws it unturned, is a model with both
+  fade keys and size keys (one like that drew nothing in game), or may show nothing
   (no particle ever alive, size, opacity or brightness 0, black glow, stretch with no speed). `*` is every effect.
   The panel shows the same as **May not show** above a layer's controls.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> [layer number] <field> <value>` sets a field the shader is built for on every layer of an effect (or one), borrowing a shader as the panel does, and prints whose and what else each layer took.

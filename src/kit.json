@@ -50,7 +50,21 @@
    "emitter_static.rotate_init_rand_x": 0,
    "emitter_static.rotate_init_rand_y": 0,
    "emitter_static.rotate_init_rand_z": 0,
-   "emission.position_random": 0
+   "emission.position_random": 0,
+   "emitter_static.rotate_add_x": 0,
+   "emitter_static.rotate_add_y": 0,
+   "emitter_static.rotate_add_z": 0,
+   "emitter_static.rotate_add_rand_x": 0,
+   "emitter_static.rotate_add_rand_y": 0,
+   "emitter_static.rotate_add_rand_z": 0,
+   "emitter_info.trans_x": 0,
+   "emitter_info.trans_y": 0,
+   "emitter_info.trans_z": 0,
+   "emitter_info.rotate_x": 0,
+   "emitter_info.rotate_y": 0,
+   "emitter_info.rotate_z": 0,
+   "sampler0.wrap_u": 1,
+   "sampler0.wrap_v": 1
   }
  },
  {
@@ -104,7 +118,21 @@
    "emitter_static.rotate_init_rand_x": 0,
    "emitter_static.rotate_init_rand_y": 0,
    "emitter_static.rotate_init_rand_z": 0,
-   "emission.position_random": 0
+   "emission.position_random": 0,
+   "emitter_static.rotate_add_x": 0,
+   "emitter_static.rotate_add_y": 0,
+   "emitter_static.rotate_add_z": 0,
+   "emitter_static.rotate_add_rand_x": 0,
+   "emitter_static.rotate_add_rand_y": 0,
+   "emitter_static.rotate_add_rand_z": 0,
+   "emitter_info.trans_x": 0,
+   "emitter_info.trans_y": 0,
+   "emitter_info.trans_z": 0,
+   "emitter_info.rotate_x": 0,
+   "emitter_info.rotate_y": 0,
+   "emitter_info.rotate_z": 0,
+   "sampler0.wrap_u": 1,
+   "sampler0.wrap_v": 1
   }
  },
  {

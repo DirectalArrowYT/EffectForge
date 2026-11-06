@@ -472,7 +472,10 @@ impl App {
                             ui.label(a.label).on_hover_text(format!("{}\n{}", a.id, a.doc));
                             changed
                         }).inner;
-                        if changed {
+                        // a value compiled into the shader also needs a shader built for it, as the panel's own controls find
+                        if changed && crate::engine::BAKED_MODES.contains(&a.id) {
+                            self.need_modes(em, &[(a.id, value)], a.label);
+                        } else if changed {
                             self.set(em, a.id, value);
                         }
                     }

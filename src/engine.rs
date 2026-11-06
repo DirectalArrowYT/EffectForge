@@ -424,6 +424,15 @@ impl Doc {
         if piece.blank.is_some() {
             let png = working_copy(&doc.path).with_file_name(if piece.is_model() { "blank_model.png" } else { "blank_sprite.png" });
             blank_texture(piece.is_model()).save(&png).with_context(|| format!("writing {}", png.display()))?;
+            // named for what it is, not for the game layer it was copied from
+            let base = if piece.is_model() { "model" } else { "sprite" };
+            for layer in first..count {
+                let taken = |name: &str| doc.emitters(set_idx).iter().enumerate().any(|(i, e)| i != layer && e.name.eq_ignore_ascii_case(name));
+                let name = std::iter::once(base.to_string()).chain((2..).map(|n| format!("{base}_{n}"))).find(|n| !taken(n)).expect("a free name");
+                if doc.emitters(set_idx)[layer].name != name {
+                    doc = doc.rename_layer(&entry, set_idx, layer, &name)?;
+                }
+            }
             for layer in first..count {
                 let target = doc.target_of(&entry, set_idx, layer);
                 doc = doc.replace_texture(&target, &png)?;
@@ -1285,9 +1294,12 @@ impl Doc {
             let key = shader_key(em, &value);
             let built: Vec<String> = ids.iter().zip(&key).filter(|(id, _)| !id.is_empty())
                 .map(|(id, k)| format!("{id}={k}")).collect();
-            lines.push(format!("    built for {}", built.join(" ")));
+            lines.push(format!("    compiled-in values as the layer sets them: {}", built.join(" ")));
             if self.turn_ignored(em) {
                 lines.push(format!("    set to turn, but the shader doesn't read {ROTATION_INPUT}, so it draws unturned"));
+            }
+            if model_fade_trap(em, model == "model") {
+                lines.push(format!("    {MODEL_FADE_TRAP}"));
             }
             for why in why_unseen(em) {
                 lines.push(format!("    may not show: {why}"));
@@ -1380,7 +1392,7 @@ pub fn texture_pixels(mut image: image::RgbaImage, how: TextureFrom) -> (image::
 }
 
 /// The panel's own controls by name, for the command line: what each takes and what it does.
-pub const PANEL_NAMES: [(&str, &str); 16] = [
+pub const PANEL_NAMES: [(&str, &str); 19] = [
     ("size", "size on every axis"),
     ("size-varies", "each particle up to this many % smaller"),
     ("colour", "r,g,b (0 to 1) or #rrggbb, where the texture is bright; Colour 2 follows while they match"),
@@ -1397,7 +1409,51 @@ pub const PANEL_NAMES: [(&str, &str); 16] = [
     ("spin-y", "degrees a frame about Y"),
     ("spin-z", "degrees a frame about Z"),
     ("roll-random", "each particle starts turned up to this many degrees either way about Z"),
+    ("fade", "opacity over life as time:opacity keys, time 0 (birth) to 1 (death), up to 8: 0:0,0.1:1,0.8:1,1:0"),
+    ("size-keys", "size over life (times the size) as time:size or time:x/y/z keys, up to 8: 0:0.2,0.5:1,1:1.5"),
+    ("colour-keys", "colour over life as time:#rrggbb or time:r/g/b keys, up to 8: 0:#ffffff,1:#2040ff"),
 ];
+
+/// `time:value,time:value...` keys of a curve over a particle's life, each value parsed by `value`: at most 8, times
+/// from 0 to 1 and never going back.
+fn curve_keys<T>(name: &str, text: &str, value: impl Fn(&str) -> Option<T>) -> Result<Vec<(f32, T)>> {
+    let keys = text.split(',').map(|key| {
+        let (time, v) = key.split_once(':').ok_or_else(|| anyhow!("{name}: {key} isn't time:value"))?;
+        let time: f32 = time.trim().parse().map_err(|_| anyhow!("{name}: time {time} isn't a number"))?;
+        if !(0.0..=1.0).contains(&time) {
+            return Err(anyhow!("{name}: time {time} is outside 0 (birth) to 1 (death)"));
+        }
+        Ok((time, value(v.trim()).ok_or_else(|| anyhow!("{name}: {v} isn't a value it takes"))?))
+    }).collect::<Result<Vec<_>>>()?;
+    if keys.len() > 8 {
+        return Err(anyhow!("{name}: {} keys; a curve holds 8", keys.len()));
+    }
+    if keys.windows(2).any(|w| w[1].0 < w[0].0) {
+        return Err(anyhow!("{name}: the times must not go back"));
+    }
+    Ok(keys)
+}
+
+/// The fields that write `keys` into the animation table `table` (`emitter_static.<table>`), with its count.
+fn key_fields(table: &str, count: &str, keys: &[(f32, [f32; 3])]) -> Vec<(String, f32)> {
+    let mut out = vec![(format!("emitter_static.{count}"), keys.len() as f32)];
+    for (i, (time, v)) in keys.iter().enumerate() {
+        for (axis, c) in ["x", "y", "z"].iter().zip(v) {
+            out.push((format!("emitter_static.{table}.keys[{i}].{axis}"), *c));
+        }
+        out.push((format!("emitter_static.{table}.keys[{i}].time"), *time));
+    }
+    out
+}
+
+/// What [`model_fade_trap`] warns of.
+pub const MODEL_FADE_TRAP: &str = "fade keys plus size keys on a model: a model layer set up like this drew nothing in game; fade it or size it by keys, not both";
+
+/// A model layer that fades by keys and also changes size by keys: set up like this, one drew nothing in game.
+pub fn model_fade_trap(em: &EmitterDef, has_model: bool) -> bool {
+    let value = |id: &str| attr(em, id).map_or(0.0, |v| v.as_f32());
+    has_model && value("particle_color.alpha0_type") == 2.0 && value("emitter_static.num_scale_keys") > 1.0
+}
 
 /// The fields one of the panel's controls (see [`PANEL_NAMES`]) sets to `text`, for a layer whose values are `value`.
 pub fn panel_values(value: &dyn Fn(&str) -> Option<f32>, name: &str, text: &str) -> Result<Vec<(String, f32)>> {
@@ -1453,6 +1509,39 @@ pub fn panel_values(value: &dyn Fn(&str) -> Option<f32>, name: &str, text: &str)
                 return Err(anyhow!("speed={text}: above 0"));
             }
             vec![("emitter_static.tex_pattern_anim0.frequency".into(), 1.0 / speed)]
+        }
+        "fade" => {
+            let keys = curve_keys(name, text, |v| v.parse::<f32>().ok().filter(|a| (0.0..=1.0).contains(a)))?;
+            let mut out = vec![("particle_color.alpha0_type".to_string(), 2.0), ("particle_color.alpha0".to_string(), keys[0].1)];
+            out.extend(key_fields("alpha0", "num_alpha0_keys", &keys.iter().map(|(t, a)| (*t, [*a; 3])).collect::<Vec<_>>()));
+            out
+        }
+        "size-keys" => {
+            let keys = curve_keys(name, text, |v| {
+                let parts: Vec<f32> = v.split('/').map(str::parse).collect::<Result<_, _>>().ok()?;
+                match parts.as_slice() {
+                    [s] => Some([*s; 3]),
+                    [x, y, z] => Some([*x, *y, *z]),
+                    _ => None,
+                }
+            })?;
+            key_fields("scale_anim", "num_scale_keys", &keys)
+        }
+        "colour-keys" => {
+            let keys = curve_keys(name, text, |v| {
+                if let Some(hex) = v.strip_prefix('#').filter(|h| h.len() == 6) {
+                    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|b| b as f32 / 255.0);
+                    return Some([byte(0)?, byte(2)?, byte(4)?]);
+                }
+                let parts: Vec<f32> = v.split('/').map(str::parse).collect::<Result<_, _>>().ok()?;
+                parts.try_into().ok()
+            })?;
+            let mut out = vec![("particle_color.color0_type".to_string(), 2.0)];
+            for (c, v) in ["r", "g", "b"].iter().zip(keys[0].1) {
+                out.push((format!("particle_color.color0_{c}"), v));
+            }
+            out.extend(key_fields("color0", "num_color0_keys", &keys));
+            out
         }
         "over" => vec![("render_state.is_depth_test".into(), flag(number()? == 0.0))],
         "glow" => vec![("render_state.blend_type".into(), flag(number()? != 0.0))],
@@ -1572,13 +1661,22 @@ impl Doc {
                     };
                     vec![(name.to_string(), parsed.ok_or_else(|| anyhow!("{name}={text}: {wants}"))?)]
                 };
+                // a curve reads better as it was typed than as its every key
+                let curve = ["fade", "size-keys", "colour-keys"].contains(name);
+                if curve {
+                    changed.push(format!("{name}={text}"));
+                }
                 for (id, v) in fields {
                     let like = attr(emitter, &id).ok_or_else(|| {
                         anyhow!("{} has no field {id} (a panel name is one of: {})", emitter.name,
                             PANEL_NAMES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "))
                     })?;
+                    let shown = crate::eff::fields::index_of(&id)
+                        .map_or(v.to_string(), |i| crate::eff::fields::show_value(crate::eff::fields::table()[i].kind, v));
                     values.insert(id.clone(), typed(like, v));
-                    changed.push(id);
+                    if !curve {
+                        changed.push(format!("{id}={shown}"));
+                    }
                 }
             }
             changed.dedup();
@@ -1586,6 +1684,27 @@ impl Doc {
         }
         let mut doc = self.apply_values(&pending)?;
         for index in (0..count).filter(|i| only.is_none_or(|o| o == *i)) {
+            // a value compiled into the shader does nothing until the layer draws with a shader built for it
+            let before = &self.emitters(set)[index];
+            let after = doc.emitters(set)[index].clone();
+            let compiled: Vec<(&str, f32)> = BAKED_MODES.iter().copied().chain(["emitter_info.follow_type"])
+                .filter_map(|id| {
+                    let now = attr(&after, id)?.as_f32();
+                    (attr(before, id).map(|v| v.as_f32()) != Some(now)).then_some((id, now))
+                })
+                .collect();
+            if !compiled.is_empty() {
+                let (next, found) = doc.reshade(&entry, set, index, &compiled, &[])?;
+                let ids = compiled.iter().map(|(id, v)| format!("{id}={v}")).collect::<Vec<_>>().join(" ");
+                report.push(match found {
+                    Some(found) if found.taken.is_empty() => format!("{}: {ids} is compiled in, so it draws with the shader of {}", after.name, found.from),
+                    Some(found) => format!("{}: {ids} is compiled in, so it draws with the shader of {}, and took {} from it",
+                        after.name, found.from, found.taken.join(", ")),
+                    None => format!("{}: {ids} is compiled in and no shader here or in the game's files draws it that way, so it draws as before",
+                        after.name),
+                });
+                doc = next;
+            }
             if doc.turn_ignored(&doc.emitters(set)[index]) {
                 let axis = ["x", "y", "z"].into_iter()
                     .find(|a| attr(&doc.emitters(set)[index], &format!("particle_data.is_rotate_{a}")).is_some_and(|v| v.as_f32() != 0.0))
@@ -1598,8 +1717,25 @@ impl Doc {
                 });
                 doc = next;
             }
+            let em = &doc.emitters(set)[index];
+            if model_fade_trap(em, doc.primitive_of(&entry, &em.name).is_some()) {
+                report.push(format!("{}: {MODEL_FADE_TRAP}", em.name));
+            }
         }
         Ok((doc, report))
+    }
+
+    /// Whether the other layers of the file that draw with this layer's shader all have another value of `id`: a
+    /// sign the shader was built for theirs, and this layer's value was typed in without one built for it.
+    pub fn shader_built_otherwise(&self, set_idx: usize, layer: usize, id: &str, value: f32) -> bool {
+        let shader_of = |em: &EmitterDef| attr(em, "shader_references.shader_index").map(|v| v.as_f32());
+        let Some(shader) = self.emitters(set_idx).get(layer).and_then(shader_of) else { return false };
+        let others: Vec<Option<f32>> = (0..self.loaded.ptcl.emitter_sets.len()).flat_map(|set| {
+            self.emitters(set).iter().enumerate()
+                .filter(move |(i, em)| (set, *i) != (set_idx, layer) && shader_of(em) == Some(shader))
+                .map(|(_, em)| attr(em, id).map(|v| v.as_f32())).collect::<Vec<_>>()
+        }).collect();
+        !others.is_empty() && others.iter().all(|v| *v != Some(value))
     }
 
     /// Layer `only` of an effect, or every layer, set to `id = value` and drawing with a shader built for it, found
@@ -1614,7 +1750,8 @@ impl Doc {
             }
             let name = self.emitters(set)[index].name.clone();
             let em = &doc.emitters(set)[index];
-            if attr(em, id).map(|v| v.as_f32()) == Some(value) && !doc.turn_ignored(em) {
+            // the value alone says nothing of the shader: it may have been typed in without one built for it
+            if attr(em, id).map(|v| v.as_f32()) == Some(value) && !doc.turn_ignored(em) && !doc.shader_built_otherwise(set, index, id, value) {
                 report.push(format!("{name}: already"));
                 continue;
             }

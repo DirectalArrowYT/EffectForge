@@ -422,7 +422,7 @@ fn build() -> Vec<Attr> {
     rows!(v, G_PARTICLE;
         [FLAG] (particle_data.infinite_life), "Infinite life", "Infinite lifespan";
         [FLAG] (particle_data.is_triming), "Trimming", "Trimming";
-        [INT] (particle_data.billboard_type), "Billboard type", "How a particle faces: 0 faces the camera; 5 and 6 stretch along its motion. The game's files also use 1 to 4 and 7. Compiled into the shader: change it from the Stretch control, which finds a shader for it";
+        [INT] (particle_data.billboard_type), "Billboard type", "How a particle faces: 0 faces the camera (a model turns so its front, +Z, faces it); 3 draws a model as it is, turned only by the layer; 5 and 6 stretch along its motion. The game's files also use 1, 2, 4 and 7. Compiled into the shader: setting it finds a shader built for it";
         [INT] (particle_data.rot_type), "Rotation type", "Rotation type";
         [INT] (particle_data.offset_type), "Offset type", "Camera depth offset type";
         [FLAG] (particle_data.rot_rev_rand_x), "Rotation reverse random X", "Random X for rotation direction";
@@ -762,8 +762,8 @@ fn build() -> Vec<Attr> {
                     concat!("Key ", stringify!($i), " Y"), "Keyframe Y component";
                 [float(0.01)] (concat!("emitter_static.", stringify!($a), ".keys[", stringify!($i), "].z") => (emitter_static.$a.keys[$i].z)),
                     concat!("Key ", stringify!($i), " Z"), "Keyframe Z component";
-                [float(0.1)] (concat!("emitter_static.", stringify!($a), ".keys[", stringify!($i), "].time") => (emitter_static.$a.keys[$i].time)),
-                    concat!("Key ", stringify!($i), " frame"), "Keyframe time in frames";
+                [float(0.01)] (concat!("emitter_static.", stringify!($a), ".keys[", stringify!($i), "].time") => (emitter_static.$a.keys[$i].time)),
+                    concat!("Key ", stringify!($i), " time"), "When the key is reached, through the particle's life: 0 at birth, 1 at death";
             )+);
         };
     }

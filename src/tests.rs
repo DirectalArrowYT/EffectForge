@@ -181,6 +181,31 @@ fn panel_names_set_what_the_controls_set() {
     assert!(panel_values(&matching, "spin-w", "1").is_err());
 }
 
+/// The curve shorthand writes a whole curve and its type, and refuses bad keys.
+#[test]
+fn curve_shorthand_writes_keys() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&path);
+    let (_, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
+    let (out, _) = doc.set_values("PIT_GUARDIAN_SHIELD", Some(0),
+        &[("fade", "0:0,0.25:1,1:0"), ("size-keys", "0:0.5,1:1/2/3"), ("colour-keys", "0:#ff0000,1:0/0/1")]).unwrap();
+    let em = &out.emitters(set)[0];
+    let v = |id: &str| engine::attr(em, id).unwrap().as_f32();
+    assert_eq!(v("particle_color.alpha0_type"), 2.0);
+    assert_eq!(v("emitter_static.num_alpha0_keys"), 3.0);
+    assert_eq!(v("emitter_static.alpha0.keys[1].x"), 1.0);
+    assert_eq!(v("emitter_static.alpha0.keys[1].time"), 0.25);
+    assert_eq!(v("emitter_static.num_scale_keys"), 2.0);
+    assert_eq!(v("emitter_static.scale_anim.keys[1].z"), 3.0);
+    assert_eq!(v("particle_color.color0_type"), 2.0);
+    assert_eq!(v("emitter_static.color0.keys[0].x"), 1.0);
+    assert_eq!(v("emitter_static.color0.keys[1].z"), 1.0);
+    for bad in ["0:1,2:0", "0.5:1,0.2:1", "0:2", "0:1,0:1,0:1,0:1,0:1,0:1,0:1,0:1,0:1", "0"] {
+        assert!(doc.set_values("PIT_GUARDIAN_SHIELD", Some(0), &[("fade", bad)]).is_err(), "{bad}");
+    }
+}
+
 /// A game layer gives no reason it may not show; one set to opacity 0, size 0 or no life gives each.
 #[test]
 fn a_layer_that_may_not_show_says_why() {
@@ -706,7 +731,7 @@ fn fields_are_unchanged() {
     assert!(tried > 1000);
     assert_eq!(fnv(&text), FIELDS);
 }
-const FIELDS: u64 = 0x8aaa67130ad7455;
+const FIELDS: u64 = 0xf12f80df2924406f;
 
 /// The folder holding the game's `effect` folder, above `file`.
 fn game_root_above(file: &std::path::Path) -> Option<PathBuf> {

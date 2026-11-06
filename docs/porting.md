@@ -16,7 +16,7 @@ compiled in, see the README's "Shaders decide some looks"), then change its numb
 | Sprite with an animated SubUV sheet | fire or smoke |
 | Sprite with a random SubUV cell per particle | smoke |
 | Velocity-aligned sprite (`PSA_Velocity`) | a speed line, or a hit spark if it is also a sheet |
-| Mesh facing the camera | a flash drawn on a mesh |
+| Mesh facing the camera | a flash drawn on a mesh, or **Blank model** with billboard 0 (the model's front, +Z, turns to the camera) |
 | Mesh in the world's orientation | wind or a ring |
 | Mesh that turns with its bone | a ring or impact that follows its bone |
 | Ribbon or anim trail | **Trail** on a sprite layer (the README's "Trails") |
@@ -53,6 +53,7 @@ compiled in, see the README's "Shaders decide some looks"), then change its numb
 | Material blend | `render_state.blend_type` (Normal / Glow (adds) / Subtract) | Additive → Glow. Translucent → Normal. |
 | Local space on / off | `emitter_info.follow_type` | Local space rides the bone. World space leaves particles behind as the bone moves; for a real trail use **Trail**. |
 | Sphere / cylinder location | `shape_info.volume_type`, `volume_radius_*` | Sphere filled or surface only. **When it emits** names every shape. |
+| Disc / ring location (a sphere or cylinder with one axis off) | `volume_type` Circle (the rim) or Filled circle, `volume_radius_*` | Flat in Smash's X/Z. Radius × 0.1. |
 | Sphere "velocity" (outward) | `particle_velocity.all_direction` | Radius × velocity scale, as a speed (× 0.1 / 60). |
 | Initial velocity | `particle_velocity.designated_dir_x/y/z` (unit), `designated_dir_scale` (speed), `diffusion_*` (spread) | Mean direction normalised, swapped to Smash axes. |
 | Velocity cone / radial | `all_direction`, `diffusion_*` | |
@@ -66,6 +67,7 @@ compiled in, see the README's "Shaders decide some looks"), then change its numb
 | SubUV index over life | `texture_anim0.pattern_anim_type` 2, `emitter_static.tex_pattern_anim0.table[i]`, `.num`, `.frequency` | Write the cells in play order, up to 32. The table plays once and holds the end. `num` = steps written, `frequency` = life ÷ steps. |
 | Random SubUV cell | `texture_anim0.pattern_anim_type` 4, `tex_pattern_anim0.num` = cells | |
 | Second texture (mask, noise) | `texture second` / **Swap texture 2…** | Only on a layer whose shader reads two textures. |
+| Texture tiling (UV scale) | `emitter_static.tex_scroll_anim0.scale_x/y`, `sampler0.wrap_u/v` Repeat | Tiling more than once needs Repeat, or the edge pixels smear. Blanks start on Repeat. |
 
 ## Textures
 
@@ -73,6 +75,21 @@ Swap the art in with **Swap texture…** (or `effect_forge texture`) and choose 
 channel, or brightness). Unreal materials often keep the art in one parameter and masks, gradients or noise in the
 rest. Port the one named like `Texture` or `Base` first. A gradient that is opaque everywhere draws as a solid square:
 that is a control map, not the art.
+
+Dynamic material parameters (`*_Tex_R`, `*_Tex_G`, `*_Tex_B`, a mask switch) pick which channel holds the shape: swap
+the texture with `shape=r|g|b` to match. A colour gradient in the material (dark stop to bright stop) maps onto
+**Colour** (where the texture is bright) and **Colour 2** (where it is dark): set `colour=` to the bright stop and
+`colour2=` to the dark one.
+
+## Curves
+
+Every curve (opacity, colour, size over life) holds at most 8 keys, each at a time from 0 (birth) to 1 (death). The
+shorthand sets a whole curve and its type at once, and finds a shader that reads it:
+
+    effect_forge set <eff> <out.eff> <EFFECT> 1 fade=0:0,0.1:1,0.8:1,1:0 size-keys=0:0.5,1:2 colour-keys=0:#ffffff,1:#ff6020
+
+Don't give a model layer both fade keys and size keys: one set up like that drew nothing in game. `caps` and `set`
+warn of it.
 
 ## Models
 

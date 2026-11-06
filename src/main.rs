@@ -265,16 +265,24 @@ fn main() {
         }
         return;
     }
-    // Values across a whole file, to see how the game's own effects use a field: attrs <eff> <id,id,...> [id=value filter]
+    // Values across a whole file, to see how the game's own effects use a field:
+    // attrs <eff> <id,id,...> [EFFECT [layer number]] [id=value filter]
     if let ["attrs", eff, ids, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         if ids.contains('=') {
             fail(&format!("attrs reads values ({ids} looks like setting one); to set: set <eff> <out> <effect> [layer number] {ids}"));
         }
-        if rest.len() > 1 || rest.first().is_some_and(|f| !f.contains('=')) {
-            fail("attrs <eff> <id,id,...> [id=value to list only layers with that value]");
+        let usage = "attrs <eff> <id,id,...> [EFFECT [layer number]] [id=value to list only layers with that value]";
+        let filters: Vec<&str> = rest.iter().copied().filter(|f| f.contains('=')).collect();
+        let scope: Vec<&str> = rest.iter().copied().filter(|f| !f.contains('=')).collect();
+        if filters.len() > 1 || scope.len() > 2 {
+            fail(usage);
         }
         let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
-        let filter = rest.first().and_then(|f| f.split_once('='));
+        let filter = filters.first().and_then(|f| f.split_once('='));
+        let only_effect = scope.first().map(|e| doc.find(e).unwrap_or_else(|e| fail(&format!("{e:#}"))).1);
+        let only_layer = scope.get(1).map(|l| {
+            l.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail(&format!("layer {l}: a number from 1; {usage}"))) - 1
+        });
         let known = |id: &str| doc.effects().iter().any(|(_, set)| doc.emitters(*set).iter().any(|em| engine::attr(em, id).is_some()));
         for id in ids.split(',').chain(filter.map(|(id, _)| id)) {
             if !known(id) {
@@ -283,10 +291,10 @@ fn main() {
                 fail(&format!("no field {id}{}", if near.is_empty() { String::new() } else { format!("; near: {}", near.join(", ")) }));
             }
         }
-        for (name, set) in doc.effects() {
-            for emitter in doc.emitters(set) {
+        for (name, set) in doc.effects().into_iter().filter(|(_, set)| only_effect.is_none_or(|o| o == *set)) {
+            for (layer, emitter) in doc.emitters(set).iter().enumerate() {
                 let value = |id: &str| engine::attr(emitter, id).map(|v| v.as_f32());
-                if filter.is_some_and(|(id, want)| value(id) != want.parse().ok()) {
+                if only_layer.is_some_and(|o| o != layer) || filter.is_some_and(|(id, want)| value(id) != want.parse().ok()) {
                     continue;
                 }
                 let kind = |id: &str| eff::fields::index_of(id).map(|i| eff::fields::table()[i].kind);
@@ -294,7 +302,7 @@ fn main() {
                     (Some(v), Some(k)) => format!("{id}={}", eff::fields::show_value(k, v)),
                     (v, _) => format!("{id}={v:?}"),
                 }).collect();
-                println!("{name} / {} : {}", emitter.name, values.join(" "));
+                println!("{name} / {} {} : {}", layer + 1, emitter.name, values.join(" "));
             }
         }
         return;
@@ -374,14 +382,17 @@ fn main() {
             let target = engine::Target { entry: entry.clone(), set_idx, set_name: doc.loaded.ptcl.emitter_sets[set_idx].name.clone(),
                 emitter_idx: layer, emitter_name: em.name.clone() };
             let doc = match *cmd {
+                // as set does on one layer: names for enum values, and a shader built for any value compiled into one
                 "value" => {
-                    let mut values = std::collections::BTreeMap::new();
-                    for pair in rest {
-                        let (id, v) = pair.split_once('=').expect("id=value");
-                        let like = engine::attr(em, id).unwrap_or_else(|| panic!("{} has no field {id}", em.name));
-                        values.insert(id.to_string(), engine::typed(like, v.parse().expect("a number")));
-                    }
-                    doc.apply_values(&engine::Pending::from([((set_idx, layer), values)]))
+                    let sets: Vec<(&str, &str)> = rest.iter().map(|pair| pair.split_once('=')
+                        .filter(|(id, v)| !id.is_empty() && !v.is_empty())
+                        .unwrap_or_else(|| fail(&format!("{pair}: id=value")))).collect();
+                    doc.set_values(effect, Some(layer), &sets).map(|(doc, report)| {
+                        for line in report {
+                            println!("{line}");
+                        }
+                        doc
+                    })
                 }
                 "texture" => {
                     let mut how = engine::TextureFrom::default();
@@ -395,13 +406,15 @@ fn main() {
                         }
                     }
                     doc.replace_texture_from(&target, Path::new(rest[0]), how).map(|(doc, notes)| {
+                        println!("{}: texture{} is now {}", target.emitter_name, if how.second { " 2" } else { "" }, rest[0]);
                         for note in notes {
                             println!("{note}");
                         }
                         doc
                     })
                 }
-                _ => load_model(rest[0], &rest[1..]).and_then(|mesh| doc.replace_mesh(&target, &mesh)),
+                _ => load_model(rest[0], &rest[1..]).and_then(|mesh| doc.replace_mesh(&target, &mesh))
+                    .inspect(|_| println!("{}: model is now {}", target.emitter_name, rest[0])),
             }.unwrap_or_else(|e| fail(&format!("{cmd}: {e:#}")));
             std::fs::write(out, &doc.bytes).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
             return;
@@ -409,16 +422,21 @@ fn main() {
     }
     // style <eff> <out.eff> <EFFECT> <layer number> <style label> <on|off>: the Draw style boxes
     if let ["style", eff, out, effect, layer, label, on] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
-        let (entry, set_idx) = doc.find(effect).expect("the effect is in the file");
-        let style = engine::STYLES.iter().find(|s| s.label.eq_ignore_ascii_case(label)).expect("a style: Soft edges, Rim fade or Heat haze");
+        let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+        let (entry, set_idx) = doc.find(effect).unwrap_or_else(|e| fail(&format!("{e:#}")));
+        let style = engine::STYLES.iter().find(|s| s.label.eq_ignore_ascii_case(label))
+            .unwrap_or_else(|| fail(&format!("{label}: a style, one of {}", engine::STYLES.iter().map(|s| s.label).collect::<Vec<_>>().join(", "))));
+        if !matches!(*on, "on" | "off") {
+            fail(&format!("{on}: on or off"));
+        }
         let value = if *on == "on" { style.on } else { 0.0 };
-        let (doc, from) = doc.restyle(&entry, set_idx, layer.parse::<usize>().expect("a layer number") - 1, style, value).expect("restyling");
+        let layer = layer.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail(&format!("layer {layer}: a number from 1"))) - 1;
+        let (doc, from) = doc.restyle(&entry, set_idx, layer, style, value).unwrap_or_else(|e| fail(&format!("{e:#}")));
         match from {
             Some(r) => println!("{} {on}: shader from {}; took {:?}", style.label, r.from, r.taken),
             None => println!("no shader in this file or the game's draws it that way; nothing changed"),
         }
-        std::fs::write(out, &doc.bytes).expect("writing");
+        std::fs::write(out, &doc.bytes).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
         return;
     }
     // import <into.eff> <from.eff> <out.eff> [replace] <EFFECT or PREFIX*...>
@@ -529,7 +547,9 @@ fn load_model(path: &str, options: &[&str]) -> anyhow::Result<eff::mesh_io::Mesh
 /// Two files' shots of an effect side by side (A left, B right), with what changed between them.
 fn ab(a: &str, b: &str, effect: &str, out: &str, frame: &str, rest: &[&str]) {
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(&format!("{e}")));
-    let shots: Vec<image::RgbaImage> = [a, b].iter().enumerate().map(|(i, eff)| {
+    // NAME, or A_NAME=B_NAME for an effect called differently in each file
+    let (effect_a, effect_b) = effect.split_once('=').unwrap_or((effect, effect));
+    let shots: Vec<image::RgbaImage> = [(a, effect_a), (b, effect_b)].iter().enumerate().map(|(i, (eff, effect))| {
         let png = std::env::temp_dir().join(format!("forge_ab_{}_{i}.png", std::process::id()));
         let mut child = std::process::Command::new(&exe)
             .args(["shot", eff, effect, png.to_str().unwrap(), frame]).args(rest)
