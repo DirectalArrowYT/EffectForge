@@ -550,6 +550,84 @@ fn smooth_normals(mesh: &mut MeshData) {
     mesh.normals = sum.into_iter().map(|n| n.try_normalize().unwrap_or(glam::Vec3::Y).to_array()).collect();
 }
 
+/// A model file by its extension: `.glb`/`.gltf`, or Unreal's `.psk`/`.pskx` ([`from_psk`]).
+pub fn load_model_file(path: &std::path::Path) -> Result<MeshData> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "psk" | "pskx" => from_psk(&bytes),
+        _ => from_gltf(&bytes),
+    }
+}
+
+/// The extensions [`load_model_file`] takes.
+pub const MODEL_EXTENSIONS: [&str; 4] = ["glb", "gltf", "psk", "pskx"];
+
+/// An Unreal ActorX mesh (`.psk`, `.pskx`), as exported by umodel and FModel: points, wedges (a point with a UV) and
+/// faces, with the vertex normals and the second UV set when there are any. Turned from Unreal's Z up to Y up as a
+/// glTF export from Blender would be, and from centimetres to Smash units (× 0.1). Bones, weights, materials and
+/// vertex colours are left out.
+pub fn from_psk(bytes: &[u8]) -> Result<MeshData> {
+    let (mut points, mut wedges, mut faces, mut normals, mut uv1) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let f32_at = |b: &[u8], o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let u16_at = |b: &[u8], o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap()) as u32;
+    let mut at = 0;
+    while at + 32 <= bytes.len() {
+        let id = String::from_utf8_lossy(&bytes[at..at + 20]).trim_end_matches('\0').to_string();
+        let (size, count) = (u32_at(bytes, at + 24) as usize, u32_at(bytes, at + 28) as usize);
+        let data = bytes.get(at + 32..at + 32 + size * count).ok_or_else(|| anyhow!("the psk's {id} runs past the end"))?;
+        let rows = data.chunks_exact(size.max(1)).take(count);
+        let vec3 = |r: &[u8]| [f32_at(r, 0), f32_at(r, 4), f32_at(r, 8)];
+        match id.as_str() {
+            "PNTS0000" => points = rows.map(vec3).collect(),
+            "VTXW0000" => {
+                let wide = count > 65536;
+                wedges = rows.map(|r| (if wide { u32_at(r, 0) } else { u16_at(r, 0) }, [f32_at(r, 4), f32_at(r, 8)])).collect();
+            }
+            "FACE0000" => faces = rows.map(|r| [u16_at(r, 0), u16_at(r, 2), u16_at(r, 4)]).collect(),
+            "FACE3200" => faces = rows.map(|r| [u32_at(r, 0), u32_at(r, 4), u32_at(r, 8)]).collect(),
+            "VTXNORMS" => normals = rows.map(vec3).collect(),
+            "EXTRAUVS0" => uv1 = rows.map(|r| [f32_at(r, 0), f32_at(r, 4)]).collect(),
+            _ => {}
+        }
+        at += 32 + size * count;
+    }
+    if points.is_empty() || wedges.is_empty() || faces.is_empty() {
+        return Err(anyhow!("no mesh in the psk (it needs points, wedges and faces)"));
+    }
+    // Z up to Y up as Blender's glTF export turns it: (x, y, z) -> (x, z, -y)
+    let turn = |[x, y, z]: [f32; 3]| [x, z, -y];
+    let mut out = MeshData::default();
+    for (point, uv) in &wedges {
+        let p = *points.get(*point as usize).ok_or_else(|| anyhow!("a psk wedge names point {point} of {}", points.len()))?;
+        out.positions.push(turn(p).map(|c| c * 0.1));
+        out.uv0.push(*uv);
+    }
+    // normals come a point each (umodel) or a wedge each
+    if normals.len() == points.len() || normals.len() == wedges.len() {
+        let by_point = normals.len() == points.len();
+        out.normals = wedges.iter().enumerate()
+            .map(|(i, (p, _))| turn(normals[if by_point { *p as usize } else { i }])).collect();
+    }
+    if uv1.len() == wedges.len() {
+        out.uv1 = uv1;
+    }
+    let count = wedges.len() as u32;
+    for face in &faces {
+        if face.iter().any(|w| *w >= count) {
+            return Err(anyhow!("a psk face names wedge {} of {count}", face.iter().max().unwrap()));
+        }
+        // the psk's faces wind the other way round
+        out.indices.extend([face[2], face[1], face[0]]);
+    }
+    if out.normals.is_empty() {
+        smooth_normals(&mut out);
+    }
+    out.check()?;
+    Ok(out)
+}
+
 pub fn from_gltf(bytes: &[u8]) -> Result<MeshData> {
     let (document, buffers, _) = gltf::import_slice(bytes).context("reading the glTF")?;
     let scene = document.default_scene().or_else(|| document.scenes().next()).ok_or_else(|| anyhow!("the glTF has no scene"))?;

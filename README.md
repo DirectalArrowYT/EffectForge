@@ -36,7 +36,7 @@ fighter type its spawns need. The move's script then spawns it by name; Forge do
 ### From scratch
 
 The first two pieces of the kit start from nothing in particular: **Blank sprite** (a soft white disc facing the camera)
-and **Blank model…** (asks for a `.glb` straight away and draws it as it is, in world orientation, with a plain white
+and **Blank model…** (asks for a `.glb` or `.psk` straight away and draws it as it is, in world orientation, with a plain white
 texture). Either is one particle, still, white, full size, living 60 frames, with no fade, spin or drift. Build it up
 from there: **Swap texture…**, the colours, **Over their life**, **When it emits** and the rest. A model without
 normals gets smooth ones from its faces. The layer is named `sprite` or `model` (then `_2`, ...).
@@ -137,6 +137,10 @@ largest side is the number beside it, **Centre** puts its middle on the layer's 
 The row shows its width, height and depth. The game's own effect models are mostly 6 to 70 across, 26 typically,
 before the layer's Size; `layers` prints each model's size.
 
+A model is a `.glb`/`.gltf`, or an Unreal `.psk`/`.pskx` as umodel or FModel export it. A psk comes in turned from
+Unreal's Z up to Y up (as Blender's glTF export turns it) and scaled from centimetres to Smash units (× 0.1), with its
+normals and second UV set. Its bones, weights, materials and vertex colours are left out.
+
 ## Porting from Unreal
 
 `docs/porting.md` maps an Unreal particle emitter's modules onto Forge's fields: units, axes, which kit layer to start
@@ -213,8 +217,8 @@ and fades (`src/app/recipes.json`).
   The panel shows the same as **May not show** above a layer's controls.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> [layer number] <field> <value>` sets a field the shader is built for on every layer of an effect (or one), borrowing a shader as the panel does, and prints whose and what else each layer took.
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
-- `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>
-  <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
+- `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model]`, `add-layer <file.eff>
+  <out.eff> <EFFECT> <piece> [model]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
   (the model is for **Blank model…**). After the model come fit options, applied in order: `turn-x|turn-y|turn-z=90|180|270`,
   `mirror=x|y|z`, `scale=<factor>`, `size=<largest side>`, `centre`, `ground`; the fitted size is printed.
 - `effect_forge value <file.eff> <out.eff> <EFFECT> <layer number> <id=value>...` sets values on one layer as the panel

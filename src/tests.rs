@@ -181,6 +181,33 @@ fn panel_names_set_what_the_controls_set() {
     assert!(panel_values(&matching, "spin-w", "1").is_err());
 }
 
+/// An Unreal psk (one triangle, Z up, centimetres) reads Y up, in Smash units, wound the other way round.
+#[test]
+fn a_psk_reads_y_up_in_smash_units() {
+    fn chunk(out: &mut Vec<u8>, id: &str, size: u32, rows: &[Vec<u8>]) {
+        let mut name = [0u8; 20];
+        name[..id.len()].copy_from_slice(id.as_bytes());
+        out.extend(name);
+        for v in [0, size, rows.len() as u32] {
+            out.extend(v.to_le_bytes());
+        }
+        rows.iter().for_each(|r| out.extend(r));
+    }
+    let floats = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+    let mut psk = Vec::new();
+    chunk(&mut psk, "ACTRHEAD", 0, &[]);
+    chunk(&mut psk, "PNTS0000", 12, &[floats(&[0.0, 0.0, 0.0]), floats(&[100.0, 0.0, 0.0]), floats(&[0.0, 0.0, 50.0])]);
+    let wedge = |p: u16, u: f32, v: f32| [p.to_le_bytes().to_vec(), vec![0, 0], floats(&[u, v]), vec![0; 4]].concat();
+    chunk(&mut psk, "VTXW0000", 16, &[wedge(0, 0.0, 0.0), wedge(1, 1.0, 0.0), wedge(2, 0.0, 1.0)]);
+    chunk(&mut psk, "FACE0000", 12, &[[0u16, 1, 2].iter().flat_map(|w| w.to_le_bytes()).chain([0; 6]).collect()]);
+    let mesh = crate::eff::mesh_io::from_psk(&psk).unwrap();
+    assert_eq!(mesh.positions, vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 5.0, 0.0]]);
+    assert_eq!(mesh.indices, vec![2, 1, 0]);
+    assert_eq!(mesh.uv0[2], [0.0, 1.0]);
+    assert_eq!(mesh.normals.len(), 3);
+    assert!(crate::eff::mesh_io::from_psk(&psk[..40]).is_err());
+}
+
 /// The curve shorthand writes a whole curve and its type, and refuses bad keys.
 #[test]
 fn curve_shorthand_writes_keys() {

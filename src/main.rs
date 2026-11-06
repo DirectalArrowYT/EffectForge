@@ -162,7 +162,11 @@ fn main() {
             }
             let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
             let model = glb.split_first().map(|(p, options)| load_model(p, options).unwrap_or_else(|e| fail(&format!("{p}: {e:#}"))));
-            let piece = || engine::kit().iter().find(|p| p.name.eq_ignore_ascii_case(what)).expect("a piece of the kit (see: kit)");
+            // the menu's trailing "…" (or "...") is optional
+            let bare = |n: &str| n.trim_end_matches('…').trim_end_matches("...").trim().to_ascii_lowercase();
+            let piece = || engine::kit().iter().find(|p| bare(&p.name) == bare(what)).unwrap_or_else(|| {
+                fail(&format!("no piece {what} in the kit; `kit` lists them"))
+            });
             let effect = || doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).expect("that effect");
             let made = match *cmd {
                 "new-effect" => doc.new_effect(name, piece(), model.as_ref()),
@@ -534,7 +538,7 @@ const COMMANDS: [&str; 31] = [
 
 /// A glTF model, fitted by each option in turn (see [`engine::MESH_OPTIONS`]), with its size printed.
 fn load_model(path: &str, options: &[&str]) -> anyhow::Result<eff::mesh_io::MeshData> {
-    let mut mesh = eff::mesh_io::from_gltf(&std::fs::read(path)?)?;
+    let mut mesh = eff::mesh_io::load_model_file(Path::new(path))?;
     for option in options {
         engine::fit_mesh(&mut mesh, option)?;
     }

@@ -1127,8 +1127,9 @@ impl App {
         if !piece.is_model() {
             return Some(None);
         }
-        let path = rfd::FileDialog::new().set_title("The model to start from").add_filter("glTF model", &["glb", "gltf"]).pick_file()?;
-        match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| mesh_io::from_gltf(&b)) {
+        let path = rfd::FileDialog::new().set_title("The model to start from")
+            .add_filter("Model (glTF, Unreal psk)", &mesh_io::MODEL_EXTENSIONS).pick_file()?;
+        match mesh_io::load_model_file(&path) {
             Ok(mesh) => Some(Some(mesh)),
             Err(e) => {
                 self.status = format!("That model didn't load: {e:#}");
@@ -1587,9 +1588,9 @@ impl App {
                     channel (textures often keep a mask in each), or its brightness (a glow drawn on black).");
             ui.checkbox(&mut self.texture_from.white, "white").on_hover_text("Drop the picture's colour for white, so the \
                 layer's colours alone tint it. For masks and greyscale shapes.");
-            if ui.add_enabled(idle && has_mesh, egui::Button::new("Swap model…")).on_hover_text("A .glb. Sprite layers have no model to swap.").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("glTF model", &["glb", "gltf"]).pick_file() {
-                    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| mesh_io::from_gltf(&b)) {
+            if ui.add_enabled(idle && has_mesh, egui::Button::new("Swap model…")).on_hover_text("A .glb, or an Unreal .psk/.pskx. Sprite layers have no model to swap.").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Model (glTF, Unreal psk)", &mesh_io::MODEL_EXTENSIONS).pick_file() {
+                    match mesh_io::load_model_file(&path) {
                         Ok(mesh) => self.draft_mesh = Some(mesh),
                         Err(e) => self.status = format!("That model didn't load: {e:#}"),
                     }

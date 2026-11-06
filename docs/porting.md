@@ -93,12 +93,15 @@ warn of it.
 
 ## Models
 
-Export the Unreal mesh to `.glb` (Y up), then fit it as you add it:
+Give the `.psk`/`.pskx` that umodel or FModel exported straight to **Swap model…**, **Blank model…** or the CLI. It
+comes in Y up and in Smash units (centimetres × 0.1), so a 300 cm ring is 30 across. A `.glb` works too, but is taken
+as it is: Y up, and no change of units (a 300 cm ring exported from Blender is 300 across until scaled).
 
-    effect_forge model <eff> <out.eff> <EFFECT> <layer> mesh.glb turn-x=90 size=26 centre
+    effect_forge model <eff> <out.eff> <EFFECT> <layer> mesh.pskx size=26 centre
 
-The options are listed in the README's "Fitting a model". Unreal meshes come in centimetres, so a 300 cm ring is 300
-across until scaled. `size=` sets its largest side directly. `layers` prints each model's size.
+The fit options are listed in the README's "Fitting a model". `size=` sets its largest side directly. `layers`
+prints each model's size. Many Unreal effect meshes are authored tiny or huge and sized by the emitter, so check the
+emitter's mesh scale too.
 
 ## Limits to plan around
 
