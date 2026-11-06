@@ -218,6 +218,21 @@ fn a_renamed_layer_keeps_the_rest() {
     assert!(doc.rename_layer(&entry, set, 1, "two words").is_err());
 }
 
+/// A row whose values have names reads a name, its short form or a number, and shows the name with the number.
+#[test]
+fn named_values_read_and_show() {
+    use crate::eff::fields::{enum_value, index_of, show_value, table};
+    let blend = table()[index_of("render_state.blend_type").unwrap()].kind;
+    assert_eq!(enum_value(blend, "glow"), Some(1.0));
+    assert_eq!(enum_value(blend, "Darken (subtracts)"), Some(2.0));
+    assert_eq!(enum_value(blend, "2"), Some(2.0));
+    assert_eq!(enum_value(blend, "sparkle"), None);
+    assert_eq!(show_value(blend, 1.0), "1 (Glow (adds))");
+    assert_eq!(show_value(blend, 7.0), "7");
+    let lat = table()[index_of("shape_info.volume_latitude_dir").unwrap()].kind;
+    assert_eq!(enum_value(lat, "-y"), Some(3.0));
+}
+
 /// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is
 /// solid or empty is pointed out.
 #[test]
@@ -643,7 +658,7 @@ fn fields_are_unchanged() {
     assert!(tried > 1000);
     assert_eq!(fnv(&text), FIELDS);
 }
-const FIELDS: u64 = 0xe330901adb819c1b;
+const FIELDS: u64 = 0x8aaa67130ad7455;
 
 /// The folder holding the game's `effect` folder, above `file`.
 fn game_root_above(file: &std::path::Path) -> Option<PathBuf> {

@@ -1491,7 +1491,16 @@ impl Doc {
                 let fields = if PANEL_NAMES.iter().any(|(n, _)| n == name) {
                     panel_values(&value, name, text)?
                 } else {
-                    vec![(name.to_string(), text.parse::<f32>().map_err(|_| anyhow!("{name}={text}: a number"))?)]
+                    let kind = crate::eff::fields::index_of(name).map(|i| crate::eff::fields::table()[i].kind);
+                    let parsed = match kind {
+                        Some(kind) => crate::eff::fields::enum_value(kind, text),
+                        None => text.parse::<f32>().ok(),
+                    };
+                    let wants = match kind {
+                        Some(crate::eff::fields::AttrKind::Enum(names)) => format!("a number or one of: {}", names.join(", ")),
+                        _ => "a number".into(),
+                    };
+                    vec![(name.to_string(), parsed.ok_or_else(|| anyhow!("{name}={text}: {wants}"))?)]
                 };
                 for (id, v) in fields {
                     let like = attr(emitter, &id).ok_or_else(|| {

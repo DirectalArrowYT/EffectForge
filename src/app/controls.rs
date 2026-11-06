@@ -16,12 +16,7 @@ pub const FOLLOW_TYPES: [(i32, &str, &str); 3] = [
     (2, "Follows position only", "Particles move with the bone but don't turn with it."),
 ];
 
-/// `shape_info.volume_type`: where in the layer particles appear.
-const SHAPES: [&str; 16] = [
-    "Point", "Circle", "Circle (even spacing)", "Filled circle", "Sphere", "Sphere (even)", "Sphere (even, 64)",
-    "Filled sphere", "Cylinder", "Filled cylinder", "Box", "Filled box", "Line", "Line (even spacing)", "Rectangle",
-    "Model surface",
-];
+use crate::eff::fields::VOLUME_TYPES as SHAPES;
 
 /// Opacity over a particle's life: (fraction of life, opacity as a share of the layer's).
 const FADES: [(&str, &[(f32, f32)]); 4] = [
@@ -463,7 +458,7 @@ impl App {
                                 AttrKind::Enum(names) => {
                                     let mut chosen = value as usize;
                                     let before = chosen;
-                                    egui::ComboBox::from_id_salt(a.id).selected_text(names.get(chosen).copied().unwrap_or("?")).show_ui(ui, |ui| {
+                                    egui::ComboBox::from_id_salt(a.id).selected_text(names.get(chosen).map(|n| n.to_string()).unwrap_or_else(|| format!("{value}"))).show_ui(ui, |ui| {
                                         for (i, name) in names.iter().enumerate() {
                                             ui.selectable_value(&mut chosen, i, *name);
                                         }

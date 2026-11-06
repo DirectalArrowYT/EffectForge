@@ -283,7 +283,11 @@ fn main() {
                 if filter.is_some_and(|(id, want)| value(id) != want.parse().ok()) {
                     continue;
                 }
-                let values: Vec<String> = ids.split(',').map(|id| format!("{id}={:?}", value(id))).collect();
+                let kind = |id: &str| eff::fields::index_of(id).map(|i| eff::fields::table()[i].kind);
+                let values: Vec<String> = ids.split(',').map(|id| match (value(id), kind(id)) {
+                    (Some(v), Some(k)) => format!("{id}={}", eff::fields::show_value(k, v)),
+                    (v, _) => format!("{id}={v:?}"),
+                }).collect();
                 println!("{name} / {} : {}", emitter.name, values.join(" "));
             }
         }

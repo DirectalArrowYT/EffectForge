@@ -170,6 +170,8 @@ and fades (`src/app/recipes.json`).
   in the window for the same).
 - Any command given the wrong arguments says so and stops; only a file (or nothing) opens the window.
 - `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field (only layers with that value, when one is given). An unknown id is an error naming close ones.
+  Fields whose values have names (blend type, follow type, volume type, arc type, latitude direction, the colour
+  types, wrap modes) print the name after the number, and `set` takes the name (`render_state.blend_type=glow`).
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge caps <file.eff> <EFFECT|*> [layer number]` prints each layer's shader: the inputs it reads and the
   values compiled into it, and says when a layer is set to turn but its shader draws it unturned, or may show nothing

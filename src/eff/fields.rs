@@ -275,6 +275,39 @@ pub const GROUPS: &[&str] = &[
 
 pub const WRAP_MODES: &[&str] = &["Mirror", "Repeat", "ClampEdge", "MirrorOnce"];
 pub const COLOR_TYPES: &[&str] = &["Constant", "Random", "Animated 8-key"];
+/// `render_state.blend_type`: how a particle's colour meets what is behind it.
+pub const BLEND_TYPES: &[&str] = &["Normal (over, by opacity)", "Glow (adds)", "Darken (subtracts)"];
+/// `emitter_info.follow_type`.
+pub const FOLLOW_TYPES: &[&str] = &["Moves with the bone", "Stays where born", "Follows position only"];
+/// `shape_info.volume_type`: where in the layer particles appear.
+pub const VOLUME_TYPES: &[&str] = &[
+    "Point", "Circle", "Circle (even spacing)", "Filled circle", "Sphere", "Sphere (even)", "Sphere (even, 64)",
+    "Filled sphere", "Cylinder", "Filled cylinder", "Box", "Filled box", "Line", "Line (even spacing)", "Rectangle",
+    "Model surface",
+];
+/// `shape_info.arc_type`: how a sphere's sweep cuts it down.
+pub const ARC_TYPES: &[&str] = &["Wedge (by longitude)", "Cap (by latitude)"];
+/// `shape_info.volume_latitude_dir`: which way a latitude cap points.
+pub const AXIS_DIRECTIONS: &[&str] = &["+X", "-X", "+Y", "-Y", "+Z", "-Z"];
+
+/// The value a name of an enum row stands for: its index, the name read without case, or the number itself.
+pub fn enum_value(kind: AttrKind, text: &str) -> Option<f32> {
+    let AttrKind::Enum(names) = kind else { return text.parse().ok() };
+    let text = text.trim();
+    names.iter().position(|n| n.eq_ignore_ascii_case(text) || n.split(" (").next().is_some_and(|short| short.eq_ignore_ascii_case(text)))
+        .map(|i| i as f32).or_else(|| text.parse().ok())
+}
+
+/// A row's value as text: the name, for an enum row, after the number.
+pub fn show_value(kind: AttrKind, value: f32) -> String {
+    match kind {
+        AttrKind::Enum(names) => match names.get(value as usize).filter(|_| value >= 0.0 && value.fract() == 0.0) {
+            Some(name) => format!("{value} ({name})"),
+            None => format!("{value}"),
+        },
+        _ => format!("{value}"),
+    }
+}
 
 fn build() -> Vec<Attr> {
     let mut v = Vec::with_capacity(1100);
@@ -310,13 +343,13 @@ fn build() -> Vec<Attr> {
         [INT] (emission.emitter_dist_particles_max), "Distance particles max", "Maximum particle emissions when using distance emission";
     );
     rows!(v, G_SHAPE;
-        [INT] (shape_info.volume_type), "Volume type", "Emitter volume type";
+        [pick(VOLUME_TYPES)] (shape_info.volume_type), "Volume type", "Where in the layer particles appear";
         [INT] (shape_info.sweep_start_random), "Sweep start random", "Arc width randomness";
-        [INT] (shape_info.arc_type), "Arc type", "Arc type";
+        [pick(ARC_TYPES)] (shape_info.arc_type), "Arc type", "How a sphere's sweep cuts it: a wedge by longitude, or a cap round the latitude direction";
         [FLAG] (shape_info.is_volume_latitude_enabled), "Volume latitude", "Unused";
         [INT] (shape_info.volume_tbl_index), "Volume table index", "Sphere volume table index";
         [INT] (shape_info.volume_tbl_index64), "Volume table index 64", "Sphere 64 volume table index";
-        [INT] (shape_info.volume_latitude_dir), "Latitude direction", "Sphere latitude direction";
+        [pick(AXIS_DIRECTIONS)] (shape_info.volume_latitude_dir), "Latitude direction", "Which way a sphere's latitude cap points (arc type Cap)";
         [FLAG] (shape_info.is_gpu_emitter), "GPU emitter", "Whether to enable the GPU emitter";
         [float(0.01)] (shape_info.sweep_longitude), "Sweep longitude", "Value to use for calculating arc";
         [float(0.01)] (shape_info.sweep_latitude), "Sweep latitude", "Latitude to use for calculating arc";
@@ -343,7 +376,7 @@ fn build() -> Vec<Attr> {
         [FLAG] (emitter_info.is_particle_draw), "Draw particles", "Draw particles";
         [INT] (emitter_info.sort_type), "Sort type", "Particle sort type";
         [INT] (emitter_info.calc_type), "Calc type", "Behavior calculation type";
-        [INT] (emitter_info.follow_type), "Follow type", "Emitter follow type";
+        [pick(FOLLOW_TYPES)] (emitter_info.follow_type), "Follow type", "How particles move with the bone the layer is on. Compiled into the shader: change it from the Follow control, which finds a shader for it";
         [FLAG] (emitter_info.is_fade_emit), "Fade emit", "Whether to stop emitting in the finalization process";
         [FLAG] (emitter_info.is_fade_alpha_fade), "Fade alpha", "Whether to apply alpha fade in the finalization process";
         [FLAG] (emitter_info.is_scale_fade), "Scale fade", "Whether to enable scale-fade";
@@ -389,7 +422,7 @@ fn build() -> Vec<Attr> {
     rows!(v, G_PARTICLE;
         [FLAG] (particle_data.infinite_life), "Infinite life", "Infinite lifespan";
         [FLAG] (particle_data.is_triming), "Trimming", "Trimming";
-        [INT] (particle_data.billboard_type), "Billboard type", "Billboard type";
+        [INT] (particle_data.billboard_type), "Billboard type", "How a particle faces: 0 faces the camera; 5 and 6 stretch along its motion. The game's files also use 1 to 4 and 7. Compiled into the shader: change it from the Stretch control, which finds a shader for it";
         [INT] (particle_data.rot_type), "Rotation type", "Rotation type";
         [INT] (particle_data.offset_type), "Offset type", "Camera depth offset type";
         [FLAG] (particle_data.rot_rev_rand_x), "Rotation reverse random X", "Random X for rotation direction";
@@ -551,7 +584,7 @@ fn build() -> Vec<Attr> {
         [FLAG] (render_state.is_depth_mask), "Depth mask", "Depth mask";
         [FLAG] (render_state.is_alpha_test), "Alpha test", "Alpha test";
         [INT] (render_state.alpha_func), "Alpha function", "Alpha test pass conditions";
-        [INT] (render_state.blend_type), "Blend type", "Blending type for blending with the framebuffer";
+        [pick(BLEND_TYPES)] (render_state.blend_type), "Blend type", "How a particle's colour meets what is behind it";
         [INT] (render_state.display_side), "Display side", "Which face is drawn";
         [float(0.01)] (render_state.alpha_threshold), "Alpha threshold", "Alpha threshold";
     );
