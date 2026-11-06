@@ -129,6 +129,34 @@ fn values_then_reshade_matches_a_borrow() {
     }
 }
 
+/// A layer set to turn whose shader can't read the start angle is pointed out, and borrowing the turn gives it a
+/// shader that reads it, even when the flag was already on.
+#[test]
+fn a_turn_borrows_a_shader_that_reads_it() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&path).expect("the game folder"));
+    }
+    let doc = open(&path);
+    let (entry, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
+    let id = "particle_data.is_rotate_x";
+    let reads = |d: &Doc, layer: usize| {
+        let shader = engine::attr(&d.emitters(set)[layer], "shader_references.shader_index").unwrap().as_f32();
+        d.variations()[shader as usize].inputs.iter().any(|n| n == engine::ROTATION_INPUT)
+    };
+    let layer = (0..doc.emitters(set).len()).find(|&l| !reads(&doc, l)).expect("a layer whose shader doesn't turn");
+    let mut pending = Pending::new();
+    let like = engine::attr(&doc.emitters(set)[layer], id).unwrap();
+    pending.entry((set, layer)).or_default().insert(id.into(), engine::typed(like, 1.0));
+    let flagged = doc.apply_values(&pending).unwrap();
+    assert!(flagged.turn_ignored(&flagged.emitters(set)[layer]));
+    let (turned, report) = flagged.borrow_on_effect(&entry, Some(layer), id, 1.0).unwrap();
+    assert!(!report[0].ends_with("already"), "{}", report[0]);
+    assert!(reads(&turned, layer), "{}", report[0]);
+    assert!(!turned.turn_ignored(&turned.emitters(set)[layer]));
+}
+
 /// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is
 /// solid or empty is pointed out.
 #[test]

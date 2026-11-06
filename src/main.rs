@@ -54,6 +54,20 @@ fn main() {
         }
         return;
     }
+    // caps <eff> <EFFECT> [layer number]: what each layer's shader is built for, the inputs it reads and the modes
+    // compiled into it, to see why a value shows nothing
+    if let ["caps", eff, wanted, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
+        let only = rest.first().map(|n| n.parse::<usize>().expect("a layer number") - 1);
+        // `*` is every effect in the file, each line led by the effect's name
+        let effects = if *wanted == "*" { doc.effects() } else { vec![doc.find(wanted).expect("the effect is in the file")] };
+        for (entry, set) in effects {
+            for line in doc.shader_caps(&entry, set, only) {
+                if *wanted == "*" { println!("{entry} {line}") } else { println!("{line}") }
+            }
+        }
+        return;
+    }
     if let ["colour2", eff, out, wanted, layer, r, g, b] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let doc = engine::Doc::open(Path::new(eff)).unwrap();
         let (_, set) = doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(wanted)).expect("that effect");

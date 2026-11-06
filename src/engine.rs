@@ -995,7 +995,12 @@ impl Doc {
         // what the game feeds each particle depends on the layer's settings, so those inputs must be the same; what
         // comes from the model (normals, vertex colour) only has to be there
         let per_particle = |inputs: &[String]| -> Vec<String> { inputs.iter().filter(|n| !MODEL_INPUTS.iter().any(|(m, _)| m == n)).cloned().collect() };
-        let inputs = per_particle(&own.inputs);
+        let mut inputs = per_particle(&own.inputs);
+        // a particle that turns is fed its start angle, which only some shaders read: without it the turn draws nothing
+        if turns(&current) && !inputs.iter().any(|n| n == ROTATION_INPUT) {
+            inputs.push(ROTATION_INPUT.to_string());
+            inputs.sort();
+        }
         // a way of facing the camera or following decides what the game feeds, so when one is asked for, the inputs
         // come with it (the layer may already hold the value its shader doesn't draw yet)
         let feeds_change = ["particle_data.billboard_type", "emitter_info.follow_type"].iter().any(|id| wanted(id).is_some());
@@ -1140,6 +1145,41 @@ impl Doc {
         Ok((doc.rebuilt(&eff)?, Some(Restyled { from, taken })))
     }
 
+    /// Whether the layer is set to turn but its shader doesn't read the start angle, so it draws unturned.
+    pub fn turn_ignored(&self, em: &EmitterDef) -> bool {
+        let value = |id: &str| attr(em, id).map(|v| v.as_f32());
+        turns(&value) && value("shader_references.shader_index")
+            .and_then(|s| self.variations().get(s as usize))
+            .is_some_and(|v| !v.inputs.iter().any(|n| n == ROTATION_INPUT))
+    }
+
+    /// What the shader of each layer of an effect (or layer `only`) is built for: the inputs its vertex stage reads,
+    /// whether it reads where the layer was born, and the values of the fields compiled into it, one line each.
+    pub fn shader_caps(&self, entry: &str, set_idx: usize, only: Option<usize>) -> Vec<String> {
+        let ids = shader_key_ids();
+        let mut lines = Vec::new();
+        for (layer, em) in self.emitters(set_idx).iter().enumerate().filter(|(l, _)| only.is_none_or(|o| o == *l)) {
+            let value = |id: &str| attr(em, id).map(|v| v.as_f32());
+            let Some(shader) = value("shader_references.shader_index") else { continue };
+            let Some(v) = self.variations().get(shader as usize) else {
+                lines.push(format!("{} {}: shader {shader} can't be read", layer + 1, em.name));
+                continue;
+            };
+            let model = if self.primitive_of(entry, &em.name).is_some() { "model" } else { "sprite" };
+            lines.push(format!("{} {} ({model}): shader {shader}, reads {}{}", layer + 1, em.name,
+                if v.inputs.is_empty() { "nothing else".to_string() } else { v.inputs.join(", ") },
+                if v.reads_birth { ", and where it was born" } else { "" }));
+            let key = shader_key(em, &value);
+            let built: Vec<String> = ids.iter().zip(&key).filter(|(id, _)| !id.is_empty())
+                .map(|(id, k)| format!("{id}={k}")).collect();
+            lines.push(format!("    built for {}", built.join(" ")));
+            if self.turn_ignored(em) {
+                lines.push(format!("    set to turn, but the shader doesn't read {ROTATION_INPUT}, so it draws unturned"));
+            }
+        }
+        lines
+    }
+
     /// The roster that keeps the first `kept` layers of set `set_idx` (played by `entry`) and drops the rest.
     fn roster_of(&self, entry: &str, set_idx: usize, kept: usize) -> EmitterRoster {
         EmitterRoster {
@@ -1221,6 +1261,14 @@ pub fn texture_pixels(mut image: image::RgbaImage, how: TextureFrom) -> (image::
     (image, notes)
 }
 
+/// The vertex input that carries a particle's start angle; a shader that doesn't read it draws every particle unturned.
+pub const ROTATION_INPUT: &str = "sysInitRotateAttr";
+
+/// Whether a layer with these values turns its particles about any axis.
+pub fn turns(value: &dyn Fn(&str) -> Option<f32>) -> bool {
+    ["x", "y", "z"].iter().any(|axis| value(&format!("particle_data.is_rotate_{axis}")).unwrap_or(0.0) != 0.0)
+}
+
 pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {
     *emitter.attrs.get(fields::index_of(id)?)?
 }
@@ -1266,7 +1314,8 @@ impl Doc {
                 continue;
             }
             let name = self.emitters(set)[index].name.clone();
-            if attr(&doc.emitters(set)[index], id).map(|v| v.as_f32()) == Some(value) {
+            let em = &doc.emitters(set)[index];
+            if attr(em, id).map(|v| v.as_f32()) == Some(value) && !doc.turn_ignored(em) {
                 report.push(format!("{name}: already"));
                 continue;
             }

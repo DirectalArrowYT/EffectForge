@@ -522,6 +522,22 @@ impl App {
         [&self.pending, &self.applying].iter().find_map(|p| p.get(&key).and_then(|p| p.get(id)).copied()).or_else(|| attr(em, id)).map(|v| v.as_f32())
     }
 
+    /// Turning about `axis` on: the game ignores an axis whose flag is off, and a shader that doesn't read the start
+    /// angle draws the particles unturned, so then the layer borrows one that does.
+    fn turn_on(&mut self, em: &EmitterDef, axis: &str) {
+        let flag = format!("particle_data.is_rotate_{axis}");
+        let reads = self.doc.as_ref().zip(self.value(em, "shader_references.shader_index"))
+            .and_then(|(doc, shader)| doc.variations().get(shader as usize).map(|v| v.inputs.iter().any(|n| n == crate::engine::ROTATION_INPUT)));
+        if reads != Some(false) || self.reshade.is_some() {
+            self.set(em, &flag, 1.0);
+            return;
+        }
+        let Some((entry, set)) = self.effect.clone() else { return };
+        let back = self.value(em, &flag).map(|v| vec![(flag.clone(), v)]);
+        self.set(em, &flag, 1.0);
+        self.reshade = Some(controls::Reshade { entry, set, layer: self.emitter, want: vec![(flag, 1.0)], what: "Rotation".into(), back });
+    }
+
     /// Colour 2 (where the texture's RGB is dark) as one fixed colour.
     fn set_colour2(&mut self, em: &EmitterDef, rgb: [f32; 3]) {
         for (i, (channel, axis)) in [("r", "x"), ("g", "y"), ("b", "z")].into_iter().enumerate() {
@@ -1679,11 +1695,14 @@ impl App {
                 self.set(em, &spin_id, spin.to_radians());
             }
             if turned || spun {
-                // The shader ignores an axis this flag leaves off.
-                self.set(em, &format!("particle_data.is_rotate_{axis}"), 1.0);
+                self.turn_on(em, axis);
             }
         }
-        self.slider(ui, em, "emitter_static.rotate_init_rand_z", 0.0..=std::f32::consts::PI, "Random roll (radians)", "Each particle starts turned up to this much either way: makes puffs look different.");
+        if self.slider(ui, em, "emitter_static.rotate_init_rand_z", 0.0..=std::f32::consts::PI, "Random roll (radians)",
+            "Each particle starts turned up to this much either way: makes puffs look different.").is_some()
+        {
+            self.turn_on(em, "z");
+        }
         ui.separator();
         let mut follow = self.value(em, "emitter_info.follow_type").unwrap_or(0.0) as i32;
         let before = follow;
