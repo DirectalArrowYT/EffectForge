@@ -34,6 +34,79 @@ pub(super) fn empty_other_effects(file: &mut effect_library::NamcoEffectFile, ke
     }
 }
 
+/// Take the effects named in `drop` out of the file entirely: entry, name, the parts (and their bone names) no other
+/// effect shares, and every emitter set no remaining effect can spawn. The 1-based handles that stay (an entry's set
+/// and first part, a part's set) are renumbered to match.
+pub(super) fn remove_entries(file: &mut effect_library::NamcoEffectFile, drop: &[&str]) -> Result<()> {
+    let gone: Vec<bool> = file.entry_names.iter().map(|n| drop.iter().any(|d| d.eq_ignore_ascii_case(n))).collect();
+    if !gone.contains(&true) {
+        return Ok(());
+    }
+    // the parts the remaining entries still use
+    let mut part_used = vec![false; file.effect_variants.len()];
+    for (entry, _) in file.entries.iter().zip(&gone).filter(|(_, g)| !**g) {
+        if entry.variant_count == 0 {
+            continue;
+        }
+        let start = (entry.variant_start_idx as usize).saturating_sub(1);
+        for used in part_used.iter_mut().skip(start).take(entry.variant_count as usize) {
+            *used = true;
+        }
+    }
+    let mut part_new = vec![0usize; part_used.len()];
+    let mut next = 0;
+    for (i, used) in part_used.iter().enumerate() {
+        if *used {
+            next += 1;
+            part_new[i] = next;
+        }
+    }
+    let mut keep_parts = part_used.iter();
+    file.effect_variants.retain(|_| *keep_parts.next().unwrap());
+    if file.external_bone_names.len() == part_used.len() {
+        let mut keep_bones = part_used.iter();
+        file.external_bone_names.retain(|_| *keep_bones.next().unwrap());
+    }
+    let mut keep_entries = gone.iter();
+    file.entries.retain(|_| !*keep_entries.next().unwrap());
+    let mut keep_names = gone.iter();
+    file.entry_names.retain(|_| !*keep_names.next().unwrap());
+    for entry in &mut file.entries {
+        if entry.variant_count > 0 {
+            let start = (entry.variant_start_idx as usize).saturating_sub(1);
+            entry.variant_start_idx = *part_new.get(start).ok_or_else(|| anyhow!("a part out of range"))? as u16;
+        }
+    }
+
+    // the sets the remaining effects can spawn; the rest go and the handles close up
+    let live = live_emitter_sets(file);
+    let Some(ptcl) = file.ptcl_file.as_mut() else {
+        return Ok(());
+    };
+    let sets = ptcl.emitter_list.emitter_sets.len();
+    let mut set_new = vec![0u32; sets];
+    let mut next = 0;
+    for (i, slot) in set_new.iter_mut().enumerate() {
+        if live.contains(&i) {
+            next += 1;
+            *slot = next;
+        }
+    }
+    let mut index = 0;
+    ptcl.emitter_list.emitter_sets.retain(|_| {
+        index += 1;
+        live.contains(&(index - 1))
+    });
+    let renumber = |id: u32| -> u32 { if id == 0 { 0 } else { set_new.get(id as usize - 1).copied().unwrap_or(0) } };
+    for entry in &mut file.entries {
+        entry.emitter_set_id = renumber(entry.emitter_set_id);
+    }
+    for part in &mut file.effect_variants {
+        part.emitter_set_id = renumber(part.emitter_set_id as u32) as u16;
+    }
+    Ok(())
+}
+
 /// Collect the 0-based emitter-set indices entry `index` can spawn into `out`.
 ///
 /// A single-part entry names one set through `emitter_set_id`. A multi-part entry names one per

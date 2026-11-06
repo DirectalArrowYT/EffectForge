@@ -134,6 +134,19 @@ pub fn keep_only_entries(src: &[u8], keep_entries: &[&str]) -> Result<Vec<u8>> {
         .context("effect_library failed to encode the reduced .eff")
 }
 
+/// The file without the effects named in `drop` (any case): their entries, names, parts and emitter sets are gone,
+/// the handles of everything that stays renumbered, and whatever only they used dropped. A script that asks for one
+/// of them by name finds nothing, which in game plays nothing.
+pub fn drop_entries(src: &[u8], drop: &[&str]) -> Result<Vec<u8>> {
+    let mut file = effect_library::NamcoEffectFile::load(src)
+        .context("effect_library failed to parse the .eff")?;
+    remove_entries(&mut file, drop)?;
+    prune_unreferenced_resources(&mut file)?;
+    compact_shader_containers(&mut file)?;
+    file.save()
+        .context("effect_library failed to encode the reduced .eff")
+}
+
 /// The file with effect `old` called `new`. Only the name changes: its layers, and the sets
 /// they live in, stay as they are.
 pub fn rename_entry(src: &[u8], old: &str, new: &str) -> Result<Vec<u8>> {

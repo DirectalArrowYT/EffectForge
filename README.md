@@ -45,7 +45,8 @@ In a project the effect list is sorted into folders: name one and **New folder**
 right-click one: **Move to**). Ctrl-click picks more than one and shift-click picks a run of them; dragging or moving
 any picked effect takes them all. Right-click a folder to rename or remove it; removing a folder keeps its effects. Tick a
 folder to skip it on export: the tick adds `UNUSED_` to its name, and every folder named `UNUSED_...` is left out. A
-skipped effect keeps its name in the exported file but plays nothing, and whatever only it used is dropped.
+skipped effect is not in the exported file at all (name, parts and emitter set), and whatever only it used is dropped;
+a set another effect also plays stays for that one. A script that still asks for a skipped effect plays nothing.
 
 **Rename** beside the effect's name renames it (letters, digits and `_`). Scripts that play it need the new name.
 

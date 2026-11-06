@@ -167,17 +167,15 @@ impl Project {
     }
 }
 
-/// `bytes` as exported: the effects of `left_out` emptied (they keep their names, so a script that still calls one
-/// plays nothing rather than failing) and whatever only they used dropped. Returns the bytes and how many were left
-/// out.
+/// `bytes` as exported: the effects of `left_out` taken out entirely (a script that still calls one finds nothing,
+/// which plays nothing) and whatever only they used dropped. Returns the bytes and how many were left out.
 pub fn exported(bytes: &[u8], left_out: &[String]) -> Result<(Vec<u8>, usize)> {
     let names = effect_library::NamcoEffectFile::load(bytes).context("reading the project's effect file")?.entry_names;
-    let keep: Vec<&str> = names.iter().filter(|n| !left_out.iter().any(|l| l.eq_ignore_ascii_case(n))).map(String::as_str).collect();
-    let skipped = names.len() - keep.len();
-    if skipped == 0 {
+    let drop: Vec<&str> = names.iter().filter(|n| left_out.iter().any(|l| l.eq_ignore_ascii_case(n))).map(String::as_str).collect();
+    if drop.is_empty() {
         return Ok((bytes.to_vec(), 0));
     }
-    Ok((crate::eff::writer::keep_only_entries(bytes, &keep)?, skipped))
+    Ok((crate::eff::writer::drop_entries(bytes, &drop)?, drop.len()))
 }
 
 /// Write the export to `to`, keeping what was there as `.forge-backup` the first time.

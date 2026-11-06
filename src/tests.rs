@@ -599,8 +599,8 @@ fn layer_duplicates() {
     }
 }
 
-/// A renamed effect keeps its layers and its values, and an export leaves the effects of a skipped folder empty and
-/// every other effect as it was.
+/// A renamed effect keeps its layers and its values, and an export takes the effects of a skipped folder out entirely
+/// (name and set) and leaves every other effect as it was.
 #[test]
 fn rename_and_export_skipping_a_folder() {
     let Some(pit) = pit() else { return };
@@ -633,10 +633,22 @@ fn rename_and_export_skipping_a_folder() {
     let skipped = crate::project::export(&std::fs::read(project.eff_path()).unwrap(), &project.left_out(), &dir.join("out.eff")).unwrap();
     assert_eq!(skipped, 1);
     let out = open(&dir.join("out.eff"));
-    assert!(!out.effects().iter().any(|(n, _)| n == "forge_renamed"), "the skipped effect is emptied");
-    let kept = effects.iter().find(|(n, _)| *n != old).unwrap();
-    let (_, out_set) = out.effects().into_iter().find(|(n, _)| *n == kept.0).expect("the other effects stay");
-    assert_eq!(out.emitters(out_set).len(), doc.emitters(kept.1).len());
+    let file = effect_library::NamcoEffectFile::load(&out.bytes).unwrap();
+    assert!(!file.entry_names.iter().any(|n| n == "forge_renamed"), "the skipped effect's name is gone");
+    assert_eq!(file.entry_names.len(), renamed.effects().len() - 1);
+    let sets = |d: &Doc| d.loaded.ptcl.emitter_sets.len();
+    assert!(sets(&out) < sets(&renamed), "its set is gone");
+    for (name, set) in renamed.effects() {
+        if name == "forge_renamed" {
+            continue;
+        }
+        let (_, out_set) = out.effects().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name} stays"));
+        let (a, b) = (renamed.emitters(set), out.emitters(out_set));
+        assert_eq!(a.len(), b.len(), "{name}");
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(x.name, y.name, "{name}");
+        }
+    }
     let mut back = project.clone();
     back.set_skipped(0, false).unwrap();
     assert_eq!(back.folders[0].name, "old");
