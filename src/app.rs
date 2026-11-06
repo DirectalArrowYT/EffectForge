@@ -13,7 +13,7 @@ use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, TextureHandle, Textu
 use crate::eff::fields::AttrValue;
 use crate::eff::mesh_io::{self, MeshData};
 use crate::eff::model::EmitterDef;
-use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned};
+use crate::engine::{attr, game_root, kit, mirror, quarter_turn, set_game_root, Doc, Pending, Piece, Target, Tuned, STYLES};
 use crate::preview::Preview as GamePreview;
 use crate::project::{self, Project};
 use crate::settings::{Settings, Theme};
@@ -25,13 +25,15 @@ enum Job {
     Mesh(Target, MeshData),
     Duplicate(String, usize, String),
     /// A new effect of this name from a piece of the kit.
-    NewEffect(String, &'static Piece),
+    NewEffect(String, &'static Piece, Option<MeshData>),
     /// A piece of the kit added to an effect as more layers.
-    AddLayer(String, &'static Piece),
+    AddLayer(String, &'static Piece, Option<MeshData>),
     /// Layer n of an effect (and the layers under it) copied, the copy placed after them.
     DuplicateLayer(String, usize, usize),
     /// Layer n of an effect (and the layers under it) taken out.
     RemoveLayer(String, usize, usize),
+    /// Layer n of an effect switched to a value of `STYLES[.3]`, on a shader drawn that way.
+    Restyle(String, usize, usize, usize, f32),
     /// Effect `.0` called `.1`.
     Rename(String, String),
     Save,
@@ -224,6 +226,9 @@ impl App {
             game.backdrop = app.settings.theme.backdrop();
         }
         app.select = select;
+        if app.shot.is_none() {
+            crate::engine::prewarm_game_shaders();
+        }
         if let Some(path) = open {
             app.run(Job::Open(path), "Opening");
         }
@@ -252,14 +257,33 @@ impl App {
                 Job::Texture(target, png) => Done::Doc(doc.expect("doc").replace_texture(&target, &png), "Texture swapped".into()),
                 Job::Mesh(target, mesh) => Done::Doc(doc.expect("doc").replace_mesh(&target, &mesh), "Model swapped".into()),
                 Job::Duplicate(entry, set, name) => Done::Doc(doc.expect("doc").duplicate(&entry, set, &name), format!("Duplicated as {name}")),
-                Job::NewEffect(name, piece) => Done::Doc(doc.expect("doc").new_effect(&name, piece),
+                Job::NewEffect(name, piece, model) => Done::Doc(doc.expect("doc").new_effect(&name, piece, model.as_ref()),
                     format!("Made {name} from {}. Keep my tuning to have rebuilds keep it", piece.name)),
-                Job::AddLayer(entry, piece) => Done::Doc(doc.expect("doc").add_layer(&entry, piece), format!("Added {}", piece.name)),
+                Job::AddLayer(entry, piece, model) => Done::Doc(doc.expect("doc").add_layer(&entry, piece, model.as_ref()), format!("Added {}", piece.name)),
                 Job::DuplicateLayer(entry, set, layer) => match doc.expect("doc").duplicate_layer(&entry, set, layer) {
                     Ok((doc, at)) => Done::Layer(Ok(doc), at),
                     Err(e) => Done::Layer(Err(e), layer),
                 },
                 Job::RemoveLayer(entry, set, layer) => Done::Doc(doc.expect("doc").remove_layer(&entry, set, layer), "Layer removed".into()),
+                Job::Restyle(entry, set, layer, style, value) => {
+                    let style = &STYLES[style];
+                    let what = format!("{} {}", style.label, if value != 0.0 { "on" } else { "off" });
+                    match doc.expect("doc").restyle(&entry, set, layer, style, value) {
+                        Ok((doc, Some(r))) => {
+                            let mut note = format!("{what}: shader from {}", r.from);
+                            if !r.taken.is_empty() {
+                                let names: Vec<&str> = r.taken.iter().map(|id| {
+                                    crate::eff::fields::table().iter().find(|a| a.id == id).map_or(id.as_str(), |a| a.label)
+                                }).collect();
+                                note += &format!("; it also needs {} as that layer has them", names.join(", "));
+                            }
+                            Done::Doc(Ok(doc), note)
+                        }
+                        Ok((doc, None)) => Done::Doc(Ok(doc), format!("{what}: no shader in this file{} draws this layer that way, so nothing changed",
+                            if game_root().is_some() { " or the game's" } else { " (choose the game files folder to look in the game's too)" })),
+                        Err(e) => Done::Doc(Err(e), what),
+                    }
+                }
                 Job::Stage(entry, set, tuned) => Done::Tuned(doc.expect("doc").stage(&entry, set, &tuned), format!("{entry} kept in {}", tuned.display())),
                 Job::Merge(tuned, into) => Done::Tuned(
                     std::fs::read(&into).map_err(anyhow::Error::from)
@@ -970,10 +994,10 @@ impl App {
             let hint = if taken { "This file already has an effect of that name." } else { "Name it, then pick the first layer from the game's own." };
             ui.add_enabled_ui(ready, |ui| {
                 ui.menu_button("New effect", |ui| {
-                    if let Some(piece) = self.kit_menu(ui) {
+                    if let Some((piece, model)) = self.kit_menu(ui).and_then(|p| Some((p, self.model_for(p)?))) {
                         self.select = Some(name.clone());
                         self.create_name.clear();
-                        self.run(Job::NewEffect(name.clone(), piece), "Making the effect");
+                        self.run(Job::NewEffect(name.clone(), piece, model), "Making the effect");
                     }
                 })
                 .response
@@ -981,6 +1005,22 @@ impl App {
                 .on_disabled_hover_text(hint);
             });
         });
+    }
+
+    /// For a blank model piece, the model to start from, asked for now: `None` when none was picked (or it didn't
+    /// load), `Some(None)` for any other piece.
+    fn model_for(&mut self, piece: &Piece) -> Option<Option<MeshData>> {
+        if !piece.is_model() {
+            return Some(None);
+        }
+        let path = rfd::FileDialog::new().set_title("The model to start from").add_filter("glTF model", &["glb", "gltf"]).pick_file()?;
+        match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| mesh_io::from_gltf(&b)) {
+            Ok(mesh) => Some(Some(mesh)),
+            Err(e) => {
+                self.status = format!("That model didn't load: {e:#}");
+                None
+            }
+        }
     }
 
     /// The kit by group, or the folder it is read from when there is none yet. The piece picked, if one was.
@@ -1239,10 +1279,10 @@ impl App {
             let ready = idle && self.pending.is_empty() && self.applying.is_empty();
             ui.add_enabled_ui(ready, |ui| {
                 ui.menu_button("Add layer", |ui| {
-                    if let Some(piece) = self.kit_menu(ui) {
+                    if let Some((piece, model)) = self.kit_menu(ui).and_then(|p| Some((p, self.model_for(p)?))) {
                         self.emitter = emitters.len();
                         self.preview = None;
-                        self.run(Job::AddLayer(entry.to_string(), piece), "Adding the layer");
+                        self.run(Job::AddLayer(entry.to_string(), piece, model), "Adding the layer");
                     }
                 })
                 .response
@@ -1490,6 +1530,22 @@ impl App {
         if ui.checkbox(&mut glow, "Glow (additive)").changed() {
             self.set(em, "render_state.blend_type", if glow { 1.0 } else { 0.0 });
         }
+        ui.label("Draw style").on_hover_text("Built into the layer's shader: switching one puts the layer on a shader drawn that way,             found in this file or the game's own effects.");
+        let ready = idle && self.pending.is_empty() && self.applying.is_empty();
+        ui.horizontal_wrapped(|ui| {
+            for (i, style) in STYLES.iter().enumerate() {
+                if style.models_only && !has_mesh {
+                    continue;
+                }
+                let mut on = self.value(em, style.field).unwrap_or(0.0) != 0.0;
+                if ui.add_enabled(ready, egui::Checkbox::new(&mut on, style.label)).on_hover_text(style.hover).changed() {
+                    if let Some(t) = self.target() {
+                        let value = if on { style.on } else { 0.0 };
+                        self.run(Job::Restyle(t.entry, t.set_idx, t.emitter_idx, i, value), &format!("Finding a shader for {}", style.label));
+                    }
+                }
+            }
+        });
     }
 
     fn turning(&mut self, ui: &mut egui::Ui, em: &EmitterDef) {

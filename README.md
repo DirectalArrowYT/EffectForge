@@ -33,6 +33,30 @@ A new effect is in the saved file only, so a rebuild of a generated file loses i
 over rebuilds like any tuned effect. Copied into a fighter's file (one under `effect/fighter/`), an effect gets the
 fighter type its spawns need. The move's script then spawns it by name; Forge does not write scripts.
 
+### From scratch
+
+The first two pieces of the kit start from nothing in particular: **Blank sprite** (a soft white disc facing the camera)
+and **Blank model…** (asks for a `.glb` straight away and draws it as it is, in world orientation, with a plain white
+texture). Either is one particle, still, white, full size, living 60 frames, with no fade, spin or drift. Build it up
+from there: **Swap texture…**, the colours, **Over their life**, **When it emits** and the rest. A model without
+normals gets smooth ones from its faces.
+
+### Draw style
+
+Under **Look**, **Draw style** switches what is compiled into the layer's shader:
+
+- **Soft edges**: fades where it cuts into the stage or a fighter, as smoke and glows do.
+- **Rim fade** (models only): the model fades where its surface turns away from the camera, for shields and auras.
+- **Heat haze**: bends what is behind it instead of drawing colour. The preview can't show it (it draws a plain
+  shape), so check it in game.
+
+Ticking one finds the shader built most like the layer's own with that style, in the open file or the game's own
+effects (choose the game files folder), and puts the layer on it. The shader must face the camera, follow the bone and
+read the same inputs as the layer's. Any other compiled-in setting it differs in, the layer takes from it so the two
+agree, and the status line names those. Colours and opacity keep what they showed, and a pulse the shader switches on
+stays still. Switching a style on also takes its tuning (soft distance, rim width, haze strength) from the layer the
+shader came from. When no shader anywhere draws the layer that way, nothing changes and the status says so.
+
 ## Projects
 
 **File > New project…** starts a project from the open file: `<name>.forge` (the folders and where it exports) and
@@ -116,7 +140,8 @@ and fades (`src/app/recipes.json`).
 
 - `cargo test --release`: the set and borrow edits must give the same bytes as the Forge of before the 2026-11-04
   cleanup, every other value must survive a rebuild, the particles spawned for all of ef_common are pinned by a hash, every
-  shader of ef_pit must translate, recipes may only name real fields, and every piece of the kit must make an effect. They read the extracted arc
+  shader of ef_pit must translate, recipes may only name real fields, and every piece of the kit must make an effect
+  (blank pieces with only their own values, and a draw style changing only what it must). They read the extracted arc
   (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`).
 
 - Crashes, GPU errors and the effect on screen go to `%APPDATA%/EffectForge/forge.log`.
@@ -126,8 +151,11 @@ and fades (`src/app/recipes.json`).
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge borrow <file.eff> <out.eff> <EFFECT> <field> <value>` borrows a shader for every layer of an effect, as the panel does, and prints whose.
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
-- `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece>`, `add-layer <file.eff>
-  <out.eff> <EFFECT> <piece>` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons.
+- `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>
+  <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons
+  (the model is for **Blank model…**).
+- `effect_forge style <file.eff> <out.eff> <EFFECT> <layer number> <Soft edges|Rim fade|Heat haze> <on|off>` is a
+  Draw style box; it prints where the shader came from and what the layer took with it.
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export
   to]` starts a project, `folder <p.forge> <folder> <EFFECT...>` puts effects in a folder, and `export <p.forge> [to]`
   exports as the window does.

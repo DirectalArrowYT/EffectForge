@@ -294,13 +294,15 @@ pub struct GameEffectRenderer {
     layouts: HashMap<u32, Layout>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     samplers: HashMap<SamplerKey, wgpu::Sampler>,
-    /// Bound to every unit a draw does not fill: white, so an unbound depth texture reads "far".
+    /// Bound to every unit a draw does not fill: white, so an unbound depth texture reads "far". Just under 1 (1 - 2^-11,
+    /// about 4000 units away with the preview's near plane of 2): soft particles turn depth 1 into a division by +0,
+    /// and an infinite distance into an alpha of 0, so at exactly 1 every soft layer vanished.
     white: wgpu::TextureView,
 }
 
 impl GameEffectRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, library: Arc<Library>) -> Self {
-        let white = upload(device, queue, "unbound texture", 1, 1, 1, wgpu::TextureFormat::Rgba8Unorm, &[255; 4]);
+        let white = upload(device, queue, "unbound texture", 1, 1, 1, wgpu::TextureFormat::Rgba16Float, &0x3bffu16.to_le_bytes().repeat(4));
         Self {
             library,
             modules: HashMap::new(),

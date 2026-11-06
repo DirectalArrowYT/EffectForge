@@ -69,12 +69,69 @@ pub fn variations(bytes: &[u8]) -> Result<Vec<Variation>> {
 /// What a shader is compiled for on a layer's side: the modes baked into it, the texture combiner, a second texture,
 /// and how the layer follows its bone. Two layers that agree here, on shaders that colour the same and read the same
 /// inputs, draw the same.
-fn shader_key(em: &EmitterDef, current: &dyn Fn(&str) -> Option<f32>) -> Vec<i64> {
+pub(crate) fn shader_key(em: &EmitterDef, current: &dyn Fn(&str) -> Option<f32>) -> Vec<i64> {
     let combiner = fields::table().iter().filter(|a| a.id.starts_with("combiner.")).map(|a| a.id);
     BAKED_MODES.iter().copied().chain(combiner).chain(["emitter_info.follow_type"])
         .map(|id| current(id).map_or(i64::MIN, |v| v as i64))
         .chain([em.texture_index1.is_some() as i64])
         .collect()
+}
+
+/// The field behind each place of [`shader_key`] (the last, a second texture, has none).
+fn shader_key_ids() -> Vec<&'static str> {
+    let combiner = fields::table().iter().filter(|a| a.id.starts_with("combiner.")).map(|a| a.id);
+    BAKED_MODES.iter().copied().chain(combiner).chain(["emitter_info.follow_type", ""]).collect()
+}
+
+/// A way of drawing that is compiled into a layer's shader, so switching it means drawing with another shader: one
+/// built the same way in every other respect.
+pub struct Style {
+    pub label: &'static str,
+    pub hover: &'static str,
+    /// The field that says so, and its value when on (off is 0).
+    pub field: &'static str,
+    pub on: f32,
+    /// Only for layers with a model.
+    pub models_only: bool,
+    /// Fields that tune the style, taken from the layer the shader comes from when it is switched on.
+    pub params: &'static [&'static str],
+}
+
+pub const STYLES: &[Style] = &[
+    Style {
+        label: "Soft edges",
+        hover: "Fades out where it cuts into the stage or a fighter instead of leaving a hard line, as smoke and glows do.",
+        field: "particle_color.is_soft_particle",
+        on: 2.0,
+        models_only: false,
+        params: &["emitter_static.soft_edge_param1", "emitter_static.soft_edge_param2", "emitter_static.soft_partcile_dist", "emitter_static.soft_particle_volume"],
+    },
+    Style {
+        label: "Rim fade",
+        hover: "The model fades where its surface turns away from the camera, so its outline goes soft (shields, auras).",
+        field: "particle_color.is_fresnel_alpha",
+        on: 1.0,
+        models_only: true,
+        params: &["emitter_static.fresnel_alpha_param1", "emitter_static.fresnel_alpha_param2"],
+    },
+    Style {
+        label: "Heat haze",
+        hover: "Bends what is behind it instead of drawing colour; the texture says where. The preview can't show it: check it in game.",
+        field: "combiner.shader_type",
+        on: 1.0,
+        models_only: false,
+        params: &["emitter_static.coefficient0", "emitter_static.coefficient1"],
+    },
+];
+
+/// Vertex inputs a shader reads from the layer's model, and the model attribute behind each.
+const MODEL_INPUTS: &[(&str, &str)] = &[("sysNormalAttr", "_n0"), ("sysVertexColor0Attr", "_c0")];
+
+/// Where [`Doc::restyle`] found the shader, and the compiled-in fields the layer took with it.
+#[derive(Clone, Debug)]
+pub struct Restyled {
+    pub from: String,
+    pub taken: Vec<String>,
 }
 
 /// A layer of one of the game's own files whose shader is wanted: its file under the game folder, the effect that
@@ -87,6 +144,15 @@ pub struct ShaderDonor {
 }
 
 type DonorKey = (Variation, Vec<i64>);
+
+/// Read the game's shaders in now (in the background) so the first Draw style switch doesn't wait for them.
+pub fn prewarm_game_shaders() {
+    if let Some(root) = game_root() {
+        std::thread::spawn(move || {
+            game_shaders(&root);
+        });
+    }
+}
 
 /// The game's fighter and common effect files, read once: for each kind of shader and layer, one layer that has it.
 fn game_shaders(root: &Path) -> &'static HashMap<DonorKey, ShaderDonor> {
@@ -230,7 +296,11 @@ impl Doc {
     }
 
     pub fn replace_texture(&self, target: &Target, png: &Path) -> Result<Self> {
+        // the usual template, else the texture the layer has now
+        let own = self.loaded.ptcl.emitter_sets.get(target.set_idx).and_then(|s| s.emitters.get(target.emitter_idx))
+            .and_then(|e| e.texture_index).and_then(|i| self.loaded.ptcl.bntx_textures.get(i as usize));
         let template = self.loaded.ptcl.bntx_textures.iter().find(|t| t.tex_name == TEXTURE_TEMPLATE)
+            .or(own.filter(|t| t.width > 0 && t.height > 0))
             .ok_or_else(|| anyhow!("this file has no {TEXTURE_TEMPLATE} texture to shape a new one on"))?;
         // A pool texture must match its template's size.
         let source = image::open(png).with_context(|| format!("reading {}", png.display()))?;
@@ -243,7 +313,7 @@ impl Doc {
         let eff = EffMod {
             textures_added: vec![TextureAddition {
                 texture_name: name.clone(),
-                template_name: TEXTURE_TEMPLATE.to_string(),
+                template_name: template.tex_name.clone(),
                 png_path: fitted_path.display().to_string(),
                 raw: false,
             }],
@@ -298,17 +368,64 @@ impl Doc {
     }
 
     /// A new effect, `name`, made of a starter piece's layers.
-    pub fn new_effect(&self, name: &str, piece: &Piece) -> Result<Self> {
+    pub fn new_effect(&self, name: &str, piece: &Piece, model: Option<&MeshData>) -> Result<Self> {
         let name = check_effect_name(name)?;
         if self.loaded.entries.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
             return Err(anyhow!("this file already has an effect called {name}"));
         }
-        self.from_piece(piece, TransplantOp { new_entry_name: name.to_string(), ..Default::default() }, game_root())
+        let made = self.from_piece(piece, TransplantOp { new_entry_name: name.to_string(), ..Default::default() }, game_root())?;
+        made.finish_piece(piece, name, 0, model)
     }
 
-    /// A starter piece's layers added to `entry`, after the ones it has.
-    pub fn add_layer(&self, entry: &str, piece: &Piece) -> Result<Self> {
-        self.from_piece(piece, TransplantOp { into_entry: Some(entry.to_string()), ..Default::default() }, game_root())
+    /// A starter piece's layers added to `entry`, after the ones it has. `model` is the model of a blank model piece.
+    pub fn add_layer(&self, entry: &str, piece: &Piece, model: Option<&MeshData>) -> Result<Self> {
+        let (_, set_idx) = self.find(entry)?;
+        let before = self.emitters(set_idx).len();
+        let made = self.from_piece(piece, TransplantOp { into_entry: Some(entry.to_string()), ..Default::default() }, game_root())?;
+        made.finish_piece(piece, entry, before, model)
+    }
+
+    /// The piece's values on its layers (those of `entry` from `first` on), then, for a blank, the plain texture
+    /// and the model.
+    fn finish_piece(self, piece: &Piece, entry: &str, first: usize, model: Option<&MeshData>) -> Result<Self> {
+        let (entry, set_idx) = self.find(entry)?;
+        let count = self.emitters(set_idx).len();
+        let mut doc = self;
+        if !piece.set.is_empty() {
+            let mut pending = Pending::new();
+            for layer in first..count {
+                let em = &doc.emitters(set_idx)[layer];
+                for (id, &v) in &piece.set {
+                    if let Some(like) = attr(em, id) {
+                        pending.entry((set_idx, layer)).or_default().insert(id.clone(), typed(like, v));
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                doc = doc.apply_values(&pending)?;
+            }
+        }
+        if piece.blank.is_some() {
+            let png = working_copy(&doc.path).with_file_name(if piece.is_model() { "blank_model.png" } else { "blank_sprite.png" });
+            blank_texture(piece.is_model()).save(&png).with_context(|| format!("writing {}", png.display()))?;
+            for layer in first..count {
+                let target = doc.target_of(&entry, set_idx, layer);
+                doc = doc.replace_texture(&target, &png)?;
+                if let Some(mesh) = model {
+                    doc = doc.replace_mesh(&doc.target_of(&entry, set_idx, layer), mesh)?;
+                }
+            }
+        }
+        Ok(doc)
+    }
+
+    /// Layer `layer` of effect `entry` as an edit names it.
+    pub fn target_of(&self, entry: &str, set_idx: usize, layer: usize) -> Target {
+        let set = &self.loaded.ptcl.emitter_sets[set_idx];
+        Target {
+            entry: entry.to_string(), set_idx, set_name: set.name.clone(), emitter_idx: layer,
+            emitter_name: set.emitters[layer].name.clone(),
+        }
     }
 
     /// `op` with the piece as its donor, read from under `root`.
@@ -478,6 +595,33 @@ pub struct Piece {
     pub file: String,
     pub effect: String,
     pub layers: Vec<String>,
+    /// A blank to build on rather than a look: `sprite` or `model`. Its texture is swapped for a plain white one (and,
+    /// for a model, its model for the one given), so nothing of the donor shows.
+    #[serde(default)]
+    pub blank: Option<String>,
+    /// Values set on the piece's layers once they are in: for a blank, what makes it one still, plain particle.
+    #[serde(default)]
+    pub set: BTreeMap<String, f32>,
+}
+
+impl Piece {
+    pub fn is_model(&self) -> bool {
+        self.blank.as_deref() == Some("model")
+    }
+}
+
+/// The plain texture a blank starts with: a white disc that softens to its edge for a sprite, flat white for a model
+/// (its own shape is the look).
+fn blank_texture(model: bool) -> image::RgbaImage {
+    image::RgbaImage::from_fn(128, 128, |x, y| {
+        if model {
+            return image::Rgba([255, 255, 255, 255]);
+        }
+        let d = (((x as f32 - 63.5).powi(2) + (y as f32 - 63.5).powi(2)).sqrt() / 64.0).min(1.0);
+        // the disc is in the colour too: some shaders take the opacity from the red channel
+        let a = ((1.0 - d).powf(0.8) * 255.0).round() as u8;
+        image::Rgba([a, a, a, a])
+    })
 }
 
 /// The starter kit, from `kit.json`.
@@ -812,21 +956,183 @@ impl Doc {
         for op in &transplants {
             let entry = op.into_entry.as_deref().unwrap_or_default();
             let (_, set_idx) = self.find(entry)?;
-            let kept = self.emitters(set_idx).len();
-            let emitters = base.emitters(set_idx);
             if eff.rosters.iter().any(|r| r.set_idx == set_idx) {
                 continue;
             }
-            eff.rosters.push(EmitterRoster {
-                set_name: base.loaded.ptcl.emitter_sets[set_idx].name.clone(),
-                entry_name: entry.to_string(),
-                set_idx,
-                slots: emitters[..kept].iter().enumerate()
-                    .map(|(i, e)| EmitterSlot { source_idx: i, source_name: e.name.clone(), name: e.name.clone(), depth: e.depth, source_set: String::new() })
-                    .collect(),
-            });
+            eff.rosters.push(base.roster_of(entry, set_idx, self.emitters(set_idx).len()));
         }
         Ok((base.rebuilt(&eff)?, found))
+    }
+
+    /// The file with layer `layer` of `entry` switched to `value` for `style`, drawing with a shader built that way: the
+    /// one, in this file or the game's own files, built most like the layer's own. It must follow the bone, face the
+    /// camera and read the vertex inputs as the layer's does, and have a second texture only if the layer has; any
+    /// other compiled-in field it differs in, the layer takes from it, so values and shader agree (the colour and fade
+    /// types count most against a shader, then which texture channels it reads, the rest of the combiner least). A shader from the game comes with a layer that
+    /// has it, added to the effect and taken out again. Switching on also takes the style's tuning (`params`) from that
+    /// layer. Returns where the shader came from and the fields taken with it, or None (and the file as it was) when
+    /// no file has one.
+    pub fn restyle(&self, entry: &str, set_idx: usize, layer: usize, style: &Style, value: f32) -> Result<(Self, Option<Restyled>)> {
+        let unchanged = || Self::from_bytes(self.path.clone(), self.bytes.clone());
+        let em = self.emitters(set_idx).get(layer).ok_or_else(|| anyhow!("no layer {layer} in {entry}"))?;
+        let stored = |id: &str| attr(em, id).map(|v| v.as_f32());
+        if stored(style.field) == Some(value) {
+            return Ok((unchanged()?, Some(Restyled { from: "its own".into(), taken: Vec::new() })));
+        }
+        let current = |id: &str| if id == style.field { Some(value) } else { stored(id) };
+        let shader = stored("shader_references.shader_index").ok_or_else(|| anyhow!("{} has no shader index", em.name))?;
+        let own = self.variations().get(shader as usize).ok_or_else(|| anyhow!("shader {shader} of {} can't be read", em.name))?;
+        let reads_birth = current("emitter_info.follow_type").unwrap_or(0.0) != 0.0;
+        // what the game feeds each particle depends on the layer's settings, so those inputs must be the same; what
+        // comes from the model (normals, vertex colour) only has to be there
+        let per_particle = |inputs: &[String]| -> Vec<String> { inputs.iter().filter(|n| !MODEL_INPUTS.iter().any(|(m, _)| m == n)).cloned().collect() };
+        let inputs = per_particle(&own.inputs);
+        let model = match self.primitive_of(entry, &em.name) {
+            Some(p) => Some(self.mesh(p)?),
+            None => None,
+        };
+        let model_has = |input: &str| model.as_ref().is_some_and(|m| match input {
+            "sysNormalAttr" => !m.normals.is_empty(),
+            _ => !m.colors.is_empty(),
+        });
+        let ids = shader_key_ids();
+        let key = shader_key(em, &current);
+        // what a difference costs: the places that must agree cost too much to take
+        const MUST: usize = usize::MAX / 1024;
+        let cost: Vec<usize> = ids.iter().map(|id| match *id {
+            "" | "particle_data.billboard_type" | "emitter_info.follow_type" => MUST,
+            id if id == style.field => MUST,
+            id if id.starts_with("particle_color.") && id.ends_with("_type") => 40,
+            // which channel of a texture gives the shape
+            id if id.starts_with("combiner.tex_") && id.ends_with("_input_type") => 45,
+            id if id.starts_with("combiner.") => 5,
+            _ => 10,
+        }).collect();
+        let fit = |v: &Variation, other: &[i64]| -> Option<usize> {
+            if v.reads_birth != reads_birth || other.len() != key.len() || per_particle(&v.inputs) != inputs
+                || v.inputs.iter().any(|n| MODEL_INPUTS.iter().any(|(m, _)| m == n) && !model_has(n))
+            {
+                return None;
+            }
+            let total: usize = (0..key.len()).filter(|&i| other[i] != key[i]).map(|i| cost[i]).sum();
+            (total < MUST).then_some(total)
+        };
+        let variations = self.variations();
+        let in_file = self.effects().into_iter().flat_map(|(effect, s)| {
+            self.emitters(s).iter().enumerate().map(move |(l, other)| (effect.clone(), s, l, other))
+        }).filter_map(|(effect, s, l, other)| {
+            let value = |id: &str| attr(other, id).map(|v| v.as_f32());
+            let v = variations.get(value("shader_references.shader_index")? as usize)?;
+            Some((fit(v, &shader_key(other, &value))?, effect, s, l))
+        }).min_by_key(|(score, effect, s, l)| (*score, effect.clone(), *s, *l));
+        let root = game_root();
+        let in_game = || -> Option<(usize, &'static ShaderDonor)> {
+            game_shaders(root.as_deref()?).iter()
+                .filter_map(|((v, other), donor)| Some((fit(v, other)?, donor)))
+                .min_by_key(|(score, d)| (*score, d.file.clone(), d.effect.clone(), d.layer.clone()))
+        };
+        // the file's own when nothing in the game is closer
+        let game = match &in_file {
+            Some((0, ..)) => None,
+            Some((near, ..)) => in_game().filter(|(score, _)| score < near),
+            None => in_game(),
+        };
+        let (base, at, from, added) = match (in_file, game) {
+            (Some((_, effect, s, l)), None) => {
+                let from = format!("{effect} / {}", self.emitters(s)[l].name);
+                (None, (s, l), from, None)
+            }
+            (_, None) => return Ok((unchanged()?, None)),
+            (_, Some((_, donor))) => {
+                let op = TransplantOp {
+                    into_entry: Some(entry.to_string()),
+                    src_file_rel: donor.file.clone(),
+                    src_set_name: donor.effect.clone(),
+                    only_emitters: vec![donor.layer.clone()],
+                    ..Default::default()
+                };
+                let base = self.rebuilt_from(&EffMod { transplants: vec![op], ..Default::default() }, root.as_deref())?;
+                let kept = self.emitters(set_idx).len();
+                let l = base.emitters(set_idx).iter().skip(kept).position(|e| e.name == donor.layer)
+                    .ok_or_else(|| anyhow!("{} didn't come in", donor.layer))? + kept;
+                (Some(base), (set_idx, l), format!("{} / {} / {}", donor.file, donor.effect, donor.layer), Some(kept))
+            }
+        };
+        let doc = base.as_ref().unwrap_or(self);
+        let em = &doc.emitters(set_idx)[layer];
+        let donor = &doc.emitters(at.0)[at.1];
+        let mut values: BTreeMap<String, AttrValue> = BTreeMap::new();
+        let like = attr(em, style.field).ok_or_else(|| anyhow!("{} has no {}", em.name, style.field))?;
+        values.insert(style.field.into(), typed(like, value));
+        let theirs = shader_key(donor, &|id| attr(donor, id).map(|v| v.as_f32()));
+        let mut taken = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            if !id.is_empty() && *id != style.field && theirs.get(i) != key.get(i) {
+                if let Some(v) = attr(donor, id) {
+                    values.insert(id.to_string(), v);
+                    taken.push(id.to_string());
+                }
+            }
+        }
+        for id in if value != 0.0 { style.params } else { &[] } {
+            if let Some(v) = attr(donor, id) {
+                values.insert(id.to_string(), v);
+            }
+        }
+        // a colour or opacity that changed between fixed and keyed keeps what it showed
+        let mut set = |id: String, v: f32| {
+            if let Some(like) = attr(em, &id) {
+                values.insert(id, typed(like, v));
+            }
+        };
+        for (which, channels) in [("color0", &["_r", "_g", "_b"][..]), ("color1", &["_r", "_g", "_b"]), ("alpha0", &[""]), ("alpha1", &[""])] {
+            let ty = format!("particle_color.{which}_type");
+            let Some(now) = attr(donor, &ty).map(|v| v.as_f32()).filter(|_| taken.contains(&ty)) else { continue };
+            let was = stored(&ty).unwrap_or(0.0);
+            let axes = ["x", "y", "z"];
+            if now == 2.0 && was != 2.0 {
+                set(format!("emitter_static.num_{which}_keys"), 1.0);
+                for (i, axis) in axes.iter().enumerate() {
+                    let constant = stored(&format!("particle_color.{which}{}", channels[i.min(channels.len() - 1)])).unwrap_or(1.0);
+                    set(format!("emitter_static.{which}.keys[0].{axis}"), constant);
+                }
+            } else if was == 2.0 && now != 2.0 {
+                for (i, channel) in channels.iter().enumerate() {
+                    let key = stored(&format!("emitter_static.{which}.keys[0].{}", axes[i])).unwrap_or(1.0);
+                    set(format!("particle_color.{which}{channel}"), key);
+                }
+            }
+        }
+        // a pulse the shader switches on stays still (the shader divides by its cycle, so that can't be 0)
+        if taken.iter().any(|id| id.starts_with("particle_fluctuation.")) {
+            for axis in ["x", "y"] {
+                set(format!("emitter_static.amplitude_{axis}"), 0.0);
+                if stored(&format!("emitter_static.cycle_{axis}")).unwrap_or(0.0) <= 0.0 {
+                    set(format!("emitter_static.cycle_{axis}"), 1.0);
+                }
+            }
+        }
+        let shader = attr(donor, "shader_references.shader_index").ok_or_else(|| anyhow!("no shader index on {}", donor.name))?;
+        values.insert("shader_references.shader_index".into(), shader);
+        let mut pending = Pending::new();
+        pending.insert((set_idx, layer), values);
+        let mut eff = doc.values_mod(&pending);
+        if let Some(kept) = added {
+            eff.rosters.push(doc.roster_of(entry, set_idx, kept));
+        }
+        Ok((doc.rebuilt(&eff)?, Some(Restyled { from, taken })))
+    }
+
+    /// The roster that keeps the first `kept` layers of set `set_idx` (played by `entry`) and drops the rest.
+    fn roster_of(&self, entry: &str, set_idx: usize, kept: usize) -> EmitterRoster {
+        EmitterRoster {
+            set_name: self.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+            entry_name: entry.to_string(),
+            set_idx,
+            slots: self.emitters(set_idx)[..kept].iter().enumerate()
+                .map(|(i, e)| EmitterSlot { source_idx: i, source_name: e.name.clone(), name: e.name.clone(), depth: e.depth, source_set: String::new() })
+                .collect(),
+        }
     }
 
     /// What a layer's shader is compiled for besides its modes: the texture combiner, mesh or sprite, and a second

@@ -537,11 +537,24 @@ pub fn to_glb(name: &str, mesh: &MeshData) -> Result<Vec<u8>> {
 /// Every triangle mesh in a glTF scene as one mesh, node transforms applied (one primitive is one shape, so a ring
 /// and a disc meant for it come in together). A vertex without a normal points up, without colour is white, without
 /// UVs gets 0 (and the first set for the second); colour and the second UV set are dropped if no mesh has them.
+/// Each vertex's normal as the area-weighted sum of its triangles' (up where it has none).
+fn smooth_normals(mesh: &mut MeshData) {
+    let mut sum = vec![glam::Vec3::ZERO; mesh.positions.len()];
+    for t in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| glam::Vec3::from(mesh.positions[i as usize]));
+        let face = (b - a).cross(c - a);
+        for &i in t {
+            sum[i as usize] += face;
+        }
+    }
+    mesh.normals = sum.into_iter().map(|n| n.try_normalize().unwrap_or(glam::Vec3::Y).to_array()).collect();
+}
+
 pub fn from_gltf(bytes: &[u8]) -> Result<MeshData> {
     let (document, buffers, _) = gltf::import_slice(bytes).context("reading the glTF")?;
     let scene = document.default_scene().or_else(|| document.scenes().next()).ok_or_else(|| anyhow!("the glTF has no scene"))?;
     let mut out = MeshData::default();
-    let (mut any_colour, mut any_uv1) = (false, false);
+    let (mut any_normal, mut any_colour, mut any_uv1) = (false, false, false);
     let mut stack: Vec<(gltf::Node, glam::Mat4)> = scene.nodes().map(|n| (n, glam::Mat4::IDENTITY)).collect();
     stack.reverse();
     while let Some((node, parent)) = stack.pop() {
@@ -557,7 +570,10 @@ pub fn from_gltf(bytes: &[u8]) -> Result<MeshData> {
             let n = out.positions.len() - base as usize;
             let normal_matrix = glam::Mat3::from_mat4(world).inverse().transpose();
             match reader.read_normals() {
-                Some(normals) => out.normals.extend(normals.map(|v| (normal_matrix * glam::Vec3::from(v)).normalize_or_zero().to_array())),
+                Some(normals) => {
+                    any_normal = true;
+                    out.normals.extend(normals.map(|v| (normal_matrix * glam::Vec3::from(v)).normalize_or_zero().to_array()));
+                }
                 None => out.normals.extend(std::iter::repeat_n([0.0, 1.0, 0.0], n)),
             }
             match reader.read_colors(0) {
@@ -584,6 +600,9 @@ pub fn from_gltf(bytes: &[u8]) -> Result<MeshData> {
         let at = stack.len();
         stack.extend(node.children().map(|c| (c, world)));
         stack[at..].reverse();
+    }
+    if !any_normal {
+        smooth_normals(&mut out);
     }
     if !any_colour {
         out.colors.clear();

@@ -111,7 +111,7 @@ fn main() {
         return;
     }
     // Making an effect from the starter kit, as the window does; each writes <out>:
-    //   new-effect <eff> <out> <new name> <piece>    add-layer <eff> <out> <effect> <piece>
+    //   new-effect <eff> <out> <new name> <piece> [model.glb]    add-layer <eff> <out> <effect> <piece> [model.glb]
     //   remove-layer <eff> <out> <effect> <layer number>    duplicate-layer <eff> <out> <effect> <layer number>    kit (lists the pieces)
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["kit"] => {
@@ -120,13 +120,14 @@ fn main() {
             }
             return;
         }
-        [cmd @ ("new-effect" | "add-layer" | "remove-layer" | "duplicate-layer"), eff, out, name, what] => {
+        [cmd @ ("new-effect" | "add-layer" | "remove-layer" | "duplicate-layer"), eff, out, name, what, glb @ ..] if glb.len() <= 1 => {
             let doc = engine::Doc::open(Path::new(eff)).unwrap();
+            let model = glb.first().map(|p| eff::mesh_io::from_gltf(&std::fs::read(p).expect("the model reads")).expect("a glTF model"));
             let piece = || engine::kit().iter().find(|p| p.name.eq_ignore_ascii_case(what)).expect("a piece of the kit (see: kit)");
             let effect = || doc.effects().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).expect("that effect");
             let made = match *cmd {
-                "new-effect" => doc.new_effect(name, piece()),
-                "add-layer" => doc.add_layer(&effect().0, piece()),
+                "new-effect" => doc.new_effect(name, piece(), model.as_ref()),
+                "add-layer" => doc.add_layer(&effect().0, piece(), model.as_ref()),
                 "duplicate-layer" => {
                     let (entry, set) = effect();
                     doc.duplicate_layer(&entry, set, what.parse().expect("a layer number")).map(|(made, _)| made)
@@ -289,6 +290,20 @@ fn main() {
             let left = fixed.trail_mismatches(None).len();
             println!("{fixable} fixed in {:.1}s, wrote {out}; {left} left in it", started.elapsed().as_secs_f32());
         }
+        return;
+    }
+    // style <eff> <out.eff> <EFFECT> <layer number> <style label> <on|off>: the Draw style boxes
+    if let ["style", eff, out, effect, layer, label, on] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
+        let (entry, set_idx) = doc.find(effect).expect("the effect is in the file");
+        let style = engine::STYLES.iter().find(|s| s.label.eq_ignore_ascii_case(label)).expect("a style: Soft edges, Rim fade or Heat haze");
+        let value = if *on == "on" { style.on } else { 0.0 };
+        let (doc, from) = doc.restyle(&entry, set_idx, layer.parse::<usize>().expect("a layer number") - 1, style, value).expect("restyling");
+        match from {
+            Some(r) => println!("{} {on}: shader from {}; took {:?}", style.label, r.from, r.taken),
+            None => println!("no shader in this file or the game's draws it that way; nothing changed"),
+        }
+        std::fs::write(out, &doc.bytes).expect("writing");
         return;
     }
     // import <into.eff> <from.eff> <out.eff> [replace] <EFFECT or PREFIX*...>

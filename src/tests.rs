@@ -503,7 +503,7 @@ fn fields_are_unchanged() {
     assert!(tried > 1000);
     assert_eq!(fnv(&text), FIELDS);
 }
-const FIELDS: u64 = 0xe01372aeb90903b3;
+const FIELDS: u64 = 0xe330901adb819c1b;
 
 /// The folder holding the game's `effect` folder, above `file`.
 fn game_root_above(file: &std::path::Path) -> Option<PathBuf> {
@@ -694,4 +694,85 @@ fn trail_shaders_follow_the_trail() {
             }
         }
     }
+}
+
+/// Every value a kit piece sets is a real field.
+#[test]
+fn kit_values_are_real_fields() {
+    for piece in engine::kit() {
+        for id in piece.set.keys() {
+            assert!(fields::table().iter().any(|a| a.id == id), "{}: no field {id}", piece.name);
+        }
+    }
+}
+
+/// A blank piece makes one plain layer with the piece's values, and the model one draws the model given to it.
+#[test]
+fn blank_pieces_start_plain() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&pit).expect("the game folder"));
+    }
+    let doc = open(&pit);
+    let quad = crate::eff::mesh_io::MeshData {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 4],
+        colors: Vec::new(),
+        uv0: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        uv1: Vec::new(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+    };
+    for piece in engine::kit().iter().filter(|p| p.blank.is_some()) {
+        let model = piece.is_model().then_some(&quad);
+        let made = doc.new_effect("BLANK_TEST", piece, model).unwrap_or_else(|e| panic!("{}: {e:#}", piece.name));
+        let (_, set) = made.find("BLANK_TEST").unwrap();
+        let layers = made.emitters(set);
+        assert_eq!(layers.len(), 1, "{}", piece.name);
+        for (id, want) in &piece.set {
+            let got = engine::attr(&layers[0], id).map(|v| v.as_f32());
+            assert_eq!(got, Some(*want), "{} {id}", piece.name);
+        }
+        if piece.is_model() {
+            let mesh = made.mesh(made.primitive_of("BLANK_TEST", &layers[0].name).expect("a model")).unwrap();
+            assert_eq!(mesh.positions.len(), 4, "{}", piece.name);
+        }
+    }
+}
+
+/// Switching a draw style on puts the layer on a shader drawn that way and changes only the style, the shader, what
+/// the shader needs and the style's tuning; switching it off again leaves it off, and no layer comes or goes.
+#[test]
+fn draw_styles_change_only_the_style() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&pit).expect("the game folder"));
+    }
+    let piece = engine::kit().iter().find(|p| p.blank.as_deref() == Some("sprite")).expect("a blank sprite");
+    let doc = open(&pit).new_effect("BLANK_TEST", piece, None).unwrap();
+    let (entry, set) = doc.find("BLANK_TEST").unwrap();
+    let soft = engine::STYLES.iter().find(|s| s.field == "particle_color.is_soft_particle").unwrap();
+    let (on, found) = doc.restyle(&entry, set, 0, soft, soft.on).unwrap();
+    let found = found.expect("a soft shader in the game");
+    let (before, after) = (&doc.emitters(set)[0], &on.emitters(set)[0]);
+    assert_eq!(on.emitters(set).len(), 1);
+    assert_eq!(engine::attr(after, soft.field).map(|v| v.as_f32()), Some(soft.on));
+    let may_change = |id: &str| id == soft.field || id == "shader_references.shader_index" || found.taken.iter().any(|t| t == id)
+        || soft.params.contains(&id) || id.starts_with("emitter_static.amplitude_") || id.starts_with("emitter_static.cycle_")
+        || id.starts_with("emitter_static.num_") || id.contains(".keys[0].") || id.starts_with("particle_color.color") || id.starts_with("particle_color.alpha");
+    for (i, (x, y)) in before.attrs.iter().zip(&after.attrs).enumerate() {
+        let id = fields::table()[i].id;
+        if !may_change(id) {
+            assert_eq!(x, y, "{id} changed");
+        }
+    }
+    for (name, s) in doc.effects() {
+        if name != entry {
+            assert_eq!(doc.emitters(s).len(), on.emitters(s).len(), "{name}");
+        }
+    }
+    let (off, _) = on.restyle(&entry, set, 0, soft, 0.0).unwrap();
+    assert_eq!(engine::attr(&off.emitters(set)[0], soft.field).map(|v| v.as_f32()), Some(0.0));
+    assert_eq!(off.emitters(set).len(), 1);
 }

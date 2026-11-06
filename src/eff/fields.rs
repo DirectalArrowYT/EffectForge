@@ -447,8 +447,8 @@ fn build() -> Vec<Attr> {
         [float(0.01)] (particle_velocity.em_vel_inherit), "Emitter velocity inherit", "Inherited emitter velocity ratio";
     );
     rows!(v, G_PTCL_COLOR;
-        [FLAG] (particle_color.is_soft_particle), "Soft particle", "Soft particles";
-        [FLAG] (particle_color.is_fresnel_alpha), "Fresnel alpha", "Fresnel alpha";
+        [INT] (particle_color.is_soft_particle), "Soft particle", "Soft edges: 0 off; the game's files use 1 and 2 (compiled into the shader, so switch it with Draw style)";
+        [INT] (particle_color.is_fresnel_alpha), "Fresnel alpha", "Rim fade: 0 off; the game's files use 1 and 2 (compiled into the shader, so switch it with Draw style)";
         [FLAG] (particle_color.is_near_dist_alpha), "Near distance alpha", "Near distance alpha";
         [FLAG] (particle_color.is_far_dist_alpha), "Far distance alpha", "Far distance alpha";
         [FLAG] (particle_color.is_decal), "Decal", "Decals";
