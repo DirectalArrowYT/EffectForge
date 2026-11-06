@@ -43,6 +43,8 @@ enum Job {
     Merge(PathBuf, PathBuf),
     /// Effects copied in from another .eff; replacing ones of the same name when true.
     Import(PathBuf, Vec<String>, bool),
+    /// Layers of this effect (or every effect) put on shaders that match how they follow their bone.
+    FixTrails(Option<String>),
 }
 
 /// Effects to copy in from another file, being picked.
@@ -134,6 +136,8 @@ pub struct App {
     rename_to: String,
     /// The import window, while open.
     importing: Option<ImportPick>,
+    /// An effect whose trail was just switched: its shaders are checked once the change is in.
+    trail_fix: Option<String>,
     folder_name: String,
     /// A folder being renamed and the name typed so far.
     folder_edit: Option<(usize, String)>,
@@ -211,7 +215,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
-            project: None, renaming: None, rename_to: String::new(), importing: None, folder_name: String::new(), folder_edit: None,
+            project: None, renaming: None, rename_to: String::new(), importing: None, trail_fix: None, folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
@@ -263,6 +267,21 @@ impl App {
                         .and_then(|(bytes, _)| Ok(std::fs::write(&into, bytes)?))
                         .map(|_| Tuned::load(&tuned)),
                     format!("Tuned effects put into {}", into.display())),
+                Job::FixTrails(only) => match doc.expect("doc").fix_trail_shaders(only.as_deref()) {
+                    Ok((doc, found)) => {
+                        let fixed = found.iter().filter(|m| m.fix.is_some()).count();
+                        let mut note = match found.len() {
+                            0 => "Every layer's shader already matches how it follows its bone".to_string(),
+                            n if fixed == n => format!("Put {n} layers on shaders that match how they follow their bone"),
+                            n => format!("Put {fixed} of {n} layers on shaders that match how they follow their bone; the rest have none"),
+                        };
+                        if fixed < found.len() && game_root().is_none() {
+                            note += " (choose the game files folder: the shaders come from the game's own effects)";
+                        }
+                        Done::Doc(Ok(doc), note)
+                    }
+                    Err(e) => Done::Doc(Err(e), "Fixing trail shaders".into()),
+                },
                 Job::Import(from, names, replace) => {
                     let file = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     match doc.expect("doc").import(&from, &names, replace) {
@@ -326,6 +345,14 @@ impl App {
                     }
                     if note != "Opened" {
                         self.unsaved = true;
+                    }
+                    // a trail just switched on or off: its layers want shaders to match
+                    if note == "Applied" {
+                        if let Some(effect) = self.trail_fix.take() {
+                            if self.doc.as_ref().is_some_and(|d| !d.trail_mismatches(Some(&effect)).is_empty()) {
+                                self.run(Job::FixTrails(Some(effect)), "Matching the shader to the trail");
+                            }
+                        }
                     }
                     self.status = note;
                 }
@@ -601,6 +628,12 @@ impl App {
                 }
             }
         }
+        let hint = "Layers that stay where their particles are born (trails) need a shader that keeps them there, \
+                    and the rest one that doesn't. Puts every layer that has the wrong one on one that matches, \
+                    copied from the game's own effects when this file has none.";
+        if ui.add_enabled(idle && self.doc.is_some() && !waiting, egui::Button::new("Fix trail shaders")).on_hover_text(hint).clicked() {
+            self.run(Job::FixTrails(None), "Fixing trail shaders");
+        }
         ui.separator();
         self.project_items(ui, idle && !waiting);
         ui.separator();
@@ -616,6 +649,28 @@ impl App {
                     Err(e) => self.status = format!("{e:#}"),
                 }
             }
+        }
+    }
+
+    /// A warning, with its fix, when the layer's shader doesn't match how it follows its bone.
+    fn trail_shader_note(&mut self, ui: &mut egui::Ui, doc: &Doc, entry: &str, em: &EmitterDef, idle: bool) {
+        let stored = |id: &str| crate::engine::attr(em, id).map(|v| v.as_f32());
+        let (Some(follow), Some(shader)) = (stored("emitter_info.follow_type"), stored("shader_references.shader_index")) else { return };
+        let Some(reads) = doc.shader_reads_birth(shader as u32) else { return };
+        if reads == (follow != 0.0) {
+            return;
+        }
+        let text = if follow != 0.0 {
+            "In game this layer rides its bone and leaves no trail: its shader doesn't keep particles where they were born."
+        } else {
+            "In game this layer leaves its particles behind: its shader keeps them where they were born."
+        };
+        ui.colored_label(Color32::from_rgb(255, 190, 90), text);
+        if ui.add_enabled(idle && self.pending.is_empty(), egui::Button::new("Fix the shader"))
+            .on_hover_text("Puts this effect's layers on shaders that match, copied from the game's own effects if need be. Nothing else changes.")
+            .clicked()
+        {
+            self.run(Job::FixTrails(Some(entry.to_string())), "Fixing trail shaders");
         }
     }
 
@@ -1239,6 +1294,7 @@ impl App {
         for warning in self.warnings(em, has_mesh) {
             ui.colored_label(Color32::from_rgb(255, 190, 90), warning);
         }
+        self.trail_shader_note(ui, doc, entry, em, idle);
         self.borrowed_note(ui, em);
         egui::CollapsingHeader::new("Look").default_open(true).show(ui, |ui| self.look(ui, em, has_mesh, idle));
         egui::CollapsingHeader::new("Behave like...").show(ui, |ui| self.recipes(ui, em, has_mesh));

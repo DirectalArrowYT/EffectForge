@@ -25,6 +25,117 @@ pub struct Doc {
     pub primitives: HashMap<String, String>,
     /// Primitive id (a name hash) -> name.
     pub primitive_ids: HashMap<u64, String>,
+    /// What each shader variation is, read from the shader binary the first time it is asked for.
+    variations: std::sync::OnceLock<Vec<Variation>>,
+}
+
+/// The vertex attributes that carry the emitter's matrix at each particle's birth. A layer whose particles stay where
+/// they were born (follow type 1 or 2) needs a shader that reads them: one that doesn't places every particle on the
+/// emitter where it is now, so they ride along with it and leave no trail. Smash's own files never break this rule.
+pub const BIRTH_MATRIX: [&str; 3] = ["sysEmtMat0Attr", "sysEmtMat1Attr", "sysEmtMat2Attr"];
+
+/// One shader variation of a file, as far as finding a stand-in for it goes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Variation {
+    /// Its vertex stage reads the birth matrix.
+    pub reads_birth: bool,
+    /// A hash of the fragment stage's code: equal means it colours the same.
+    pub fragment: u64,
+    /// The other vertex attributes it reads, sorted.
+    pub inputs: Vec<String>,
+}
+
+/// Every shader variation of an .eff, by `shader_references.shader_index`.
+pub fn variations(bytes: &[u8]) -> Result<Vec<Variation>> {
+    let namco = effect_library::NamcoEffectFile::load(bytes).context("reading the effect file")?;
+    let Some(grsc) = namco.ptcl_file.as_ref().and_then(|p| p.shader_info.as_ref()).and_then(|s| s.binary_data.as_ref()) else {
+        return Ok(Vec::new());
+    };
+    let bnsh = effect_library::bnsh::BnshFile::read(grsc).context("reading the shader binary")?;
+    let hash = |bytes: &[u8]| bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    Ok(bnsh.variations.iter().map(|v| {
+        let p = &v.binary_program;
+        let names: Vec<String> = p.reflections[0].as_ref().map(|r| r.input_slots().into_iter().map(|(n, _)| n).collect()).unwrap_or_default();
+        let mut inputs: Vec<String> = names.iter().filter(|n| !BIRTH_MATRIX.contains(&n.as_str())).cloned().collect();
+        inputs.sort();
+        Variation {
+            reads_birth: names.iter().any(|n| n == BIRTH_MATRIX[0]),
+            fragment: p.stages[4].as_ref().map_or(0, |f| hash(&f.byte_code)),
+            inputs,
+        }
+    }).collect())
+}
+
+/// What a shader is compiled for on a layer's side: the modes baked into it, the texture combiner, a second texture,
+/// and how the layer follows its bone. Two layers that agree here, on shaders that colour the same and read the same
+/// inputs, draw the same.
+fn shader_key(em: &EmitterDef, current: &dyn Fn(&str) -> Option<f32>) -> Vec<i64> {
+    let combiner = fields::table().iter().filter(|a| a.id.starts_with("combiner.")).map(|a| a.id);
+    BAKED_MODES.iter().copied().chain(combiner).chain(["emitter_info.follow_type"])
+        .map(|id| current(id).map_or(i64::MIN, |v| v as i64))
+        .chain([em.texture_index1.is_some() as i64])
+        .collect()
+}
+
+/// A layer of one of the game's own files whose shader is wanted: its file under the game folder, the effect that
+/// plays it, and its name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ShaderDonor {
+    pub file: String,
+    pub effect: String,
+    pub layer: String,
+}
+
+type DonorKey = (Variation, Vec<i64>);
+
+/// The game's fighter and common effect files, read once: for each kind of shader and layer, one layer that has it.
+fn game_shaders(root: &Path) -> &'static HashMap<DonorKey, ShaderDonor> {
+    static INDEX: std::sync::OnceLock<HashMap<DonorKey, ShaderDonor>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let started = std::time::Instant::now();
+        let mut files = Vec::new();
+        for dir in ["effect/fighter", "effect/system"] {
+            for folder in std::fs::read_dir(root.join(dir)).into_iter().flatten().flatten() {
+                for file in std::fs::read_dir(folder.path()).into_iter().flatten().flatten() {
+                    if file.path().extension().is_some_and(|e| e == "eff") {
+                        files.push(file.path());
+                    }
+                }
+            }
+        }
+        files.sort();
+        let mut index = HashMap::new();
+        for path in &files {
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            let (Ok(vars), Ok(loaded)) = (variations(&bytes), load_effect(path)) else { continue };
+            let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+            // transplants find a donor by the effect that plays it
+            for entry in &loaded.entries {
+                let Some(set) = entry.set_idx.and_then(|i| loaded.ptcl.emitter_sets.get(i)) else { continue };
+                for em in &set.emitters {
+                    let current = |id: &str| attr(em, id).map(|v| v.as_f32());
+                    let Some(v) = current("shader_references.shader_index").and_then(|v| vars.get(v as usize)) else { continue };
+                    index.entry((v.clone(), shader_key(em, &current)))
+                        .or_insert_with(|| ShaderDonor { file: rel.clone(), effect: entry.name.clone(), layer: em.name.clone() });
+                }
+            }
+        }
+        crate::log::note(&format!("read the shaders of {} game files in {:.1}s", files.len(), started.elapsed().as_secs_f32()));
+        index
+    })
+}
+
+/// A layer whose shader doesn't match how it follows its bone.
+#[derive(Clone, Debug)]
+pub struct TrailMismatch {
+    pub effect: String,
+    pub set_idx: usize,
+    pub layer: usize,
+    pub name: String,
+    pub follow_type: i64,
+    pub shader: u32,
+    /// Where a shader that matches comes from, if one was found.
+    pub fix: Option<String>,
 }
 
 /// One emitter's pending attribute changes, by attribute id.
@@ -59,7 +170,7 @@ impl Doc {
                 primitives.insert(user, listing.name.clone());
             }
         }
-        Ok(Self { path, bytes, loaded, primitives, primitive_ids })
+        Ok(Self { path, bytes, loaded, primitives, primitive_ids, variations: Default::default() })
     }
 
     pub fn effects(&self) -> Vec<(String, usize)> {
@@ -98,6 +209,11 @@ impl Doc {
     }
 
     pub fn apply_values(&self, pending: &Pending) -> Result<Self> {
+        self.rebuilt(&self.values_mod(pending))
+    }
+
+    /// The edits that put `pending` in.
+    fn values_mod(&self, pending: &Pending) -> EffMod {
         let mut eff = EffMod::default();
         for ((set_idx, emitter_idx), attrs) in pending {
             let set = &self.loaded.ptcl.emitter_sets[*set_idx];
@@ -110,7 +226,7 @@ impl Doc {
                 fields: EmitterFieldEdits { attrs: attrs.clone(), ..Default::default() },
             });
         }
-        self.rebuilt(&eff)
+        eff
     }
 
     pub fn replace_texture(&self, target: &Target, png: &Path) -> Result<Self> {
@@ -593,6 +709,126 @@ pub const BAKED_MODES: &[&str] = &[
 ];
 
 impl Doc {
+    /// The file's shader variations (empty if it has no shaders or they can't be read).
+    pub fn variations(&self) -> &[Variation] {
+        self.variations.get_or_init(|| variations(&self.bytes).unwrap_or_else(|e| {
+            crate::log::note(&format!("reading the shader variations failed: {e:#}"));
+            Vec::new()
+        }))
+    }
+
+    /// Whether variation `shader` keeps particles where they were born (reads the birth matrix). None when unknown.
+    pub fn shader_reads_birth(&self, shader: u32) -> Option<bool> {
+        self.variations().get(shader as usize).map(|v| v.reads_birth)
+    }
+
+    /// The variation that layer `em` should draw with given its values (`current`): one that colours the same and reads
+    /// the same inputs as its shader now, reads the birth matrix exactly when the layer stays where it is born, and is
+    /// used in this file by a layer with the same [`shader_key`]. None when this file has none.
+    fn matching_shader(&self, em: &EmitterDef, current: &dyn Fn(&str) -> Option<f32>) -> Option<(u32, DonorKey)> {
+        let variations = self.variations();
+        let own = variations.get(current("shader_references.shader_index")? as usize)?;
+        let want = Variation { reads_birth: current("emitter_info.follow_type")? != 0.0, ..own.clone() };
+        let key = shader_key(em, current);
+        let found = self.loaded.ptcl.emitter_sets.iter().flat_map(|s| &s.emitters).find_map(|other| {
+            let v = attr(other, "shader_references.shader_index")?.as_i64() as u32;
+            (variations.get(v as usize) == Some(&want) && shader_key(other, &|id| attr(other, id).map(|a| a.as_f32())) == key).then_some(v)
+        });
+        Some((found.unwrap_or(u32::MAX), (want, key)))
+    }
+
+    /// Every layer whose shader doesn't match its follow type (of effect `only`, or all).
+    pub fn trail_mismatches(&self, only: Option<&str>) -> Vec<TrailMismatch> {
+        let mut out = Vec::new();
+        for (effect, set_idx) in self.effects() {
+            if only.is_some_and(|o| !o.eq_ignore_ascii_case(&effect)) {
+                continue;
+            }
+            for (layer, em) in self.emitters(set_idx).iter().enumerate() {
+                let current = |id: &str| attr(em, id).map(|v| v.as_f32());
+                let (Some(follow), Some(shader)) = (current("emitter_info.follow_type"), current("shader_references.shader_index")) else { continue };
+                if self.shader_reads_birth(shader as u32).is_none_or(|reads| reads == (follow != 0.0)) {
+                    continue;
+                }
+                out.push(TrailMismatch { effect: effect.clone(), set_idx, layer, name: em.name.clone(), follow_type: follow as i64, shader: shader as u32, fix: None });
+            }
+        }
+        out
+    }
+
+    /// The file with every layer of `only` (or of every effect) that [`trail_mismatches`](Self::trail_mismatches)
+    /// finds drawing with a shader that matches: one this file already has, else one copied in from the game's own
+    /// files (a layer that uses it is added to the effect, which brings the shader, and taken out again). Nothing else
+    /// about a layer changes. Returns it and the mismatches, with what fixed each.
+    pub fn fix_trail_shaders(&self, only: Option<&str>) -> Result<(Self, Vec<TrailMismatch>)> {
+        let mut found = self.trail_mismatches(only);
+        if found.is_empty() {
+            return Ok((Self::from_bytes(self.path.clone(), self.bytes.clone())?, found));
+        }
+        // shaders this file lacks: one game layer per kind, added to the first effect that needs it
+        let mut transplants: Vec<TransplantOp> = Vec::new();
+        let mut donors: Vec<ShaderDonor> = Vec::new();
+        let root = game_root();
+        for m in &mut found {
+            let em = &self.emitters(m.set_idx)[m.layer];
+            let current = |id: &str| attr(em, id).map(|v| v.as_f32());
+            let Some((v, key)) = self.matching_shader(em, &current) else { continue };
+            if v != u32::MAX {
+                continue;
+            }
+            let Some(donor) = root.as_deref().and_then(|root| game_shaders(root).get(&key)) else { continue };
+            m.fix = Some(format!("{} / {} / {}", donor.file, donor.effect, donor.layer));
+            if !donors.contains(donor) {
+                donors.push(donor.clone());
+                transplants.push(TransplantOp {
+                    into_entry: Some(m.effect.clone()),
+                    src_file_rel: donor.file.clone(),
+                    src_set_name: donor.effect.clone(),
+                    only_emitters: vec![donor.layer.clone()],
+                    ..Default::default()
+                });
+            }
+        }
+        let with_donors = if transplants.is_empty() { None } else {
+            Some(self.rebuilt_from(&EffMod { transplants: transplants.clone(), ..Default::default() }, root.as_deref())?)
+        };
+        let base = with_donors.as_ref().unwrap_or(self);
+        let mut pending = Pending::new();
+        for m in &mut found {
+            let em = &base.emitters(m.set_idx)[m.layer];
+            let current = |id: &str| attr(em, id).map(|v| v.as_f32());
+            let Some((v, _)) = base.matching_shader(em, &current).filter(|(v, _)| *v != u32::MAX) else {
+                m.fix = None;
+                continue;
+            };
+            if m.fix.is_none() {
+                m.fix = Some(format!("shader {v} of this file"));
+            }
+            let like = attr(em, "shader_references.shader_index").ok_or_else(|| anyhow!("no shader index on {}", m.name))?;
+            pending.entry((m.set_idx, m.layer)).or_default().insert("shader_references.shader_index".into(), typed(like, v as f32));
+        }
+        let mut eff = base.values_mod(&pending);
+        // the added layers go again: each effect keeps the layers it had
+        for op in &transplants {
+            let entry = op.into_entry.as_deref().unwrap_or_default();
+            let (_, set_idx) = self.find(entry)?;
+            let kept = self.emitters(set_idx).len();
+            let emitters = base.emitters(set_idx);
+            if eff.rosters.iter().any(|r| r.set_idx == set_idx) {
+                continue;
+            }
+            eff.rosters.push(EmitterRoster {
+                set_name: base.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+                entry_name: entry.to_string(),
+                set_idx,
+                slots: emitters[..kept].iter().enumerate()
+                    .map(|(i, e)| EmitterSlot { source_idx: i, source_name: e.name.clone(), name: e.name.clone(), depth: e.depth, source_set: String::new() })
+                    .collect(),
+            });
+        }
+        Ok((base.rebuilt(&eff)?, found))
+    }
+
     /// What a layer's shader is compiled for besides its modes: the texture combiner, mesh or sprite, and a second
     /// texture. Two layers that agree here draw alike, so one can use the other's shader.
     fn look(&self, entry: &str, em: &EmitterDef) -> (Vec<(usize, i64)>, bool, bool) {

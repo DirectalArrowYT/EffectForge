@@ -642,3 +642,44 @@ fn rename_and_export_skipping_a_folder() {
     assert_eq!(back.folders[0].name, "old");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Turning a layer's trail on leaves it on a shader that doesn't keep its particles where they were born; the fix puts
+/// it on one that does (from the game's own files if need be) and changes nothing else about any layer.
+#[test]
+fn trail_shaders_follow_the_trail() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&pit).expect("the game folder"));
+    }
+    let doc = open(&pit);
+    assert!(doc.trail_mismatches(None).is_empty(), "the game's own file breaks the rule");
+    let follow = |em: &crate::eff::model::EmitterDef, id: &str| engine::attr(em, id).map(|v| v.as_i64());
+    let (entry, set, layer) = doc.effects().into_iter()
+        .find_map(|(n, set)| {
+            let ems = doc.emitters(set);
+            (0..ems.len()).find(|&i| follow(&ems[i], "emitter_info.follow_type") == Some(0)).map(|i| (n.clone(), set, i))
+        })
+        .expect("a layer that rides its bone");
+    let mut pending = Pending::new();
+    pending.entry((set, layer)).or_default().insert("emitter_info.follow_type".into(), AttrValue::Int(1));
+    let trailed = doc.apply_values(&pending).unwrap();
+    assert_eq!(trailed.trail_mismatches(Some(&entry)).len(), 1);
+    let (fixed, found) = trailed.fix_trail_shaders(Some(&entry)).unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].fix.is_some(), "no shader for {}", found[0].name);
+    assert!(fixed.trail_mismatches(None).is_empty());
+    let shader = fields::table().iter().position(|a| a.id == "shader_references.shader_index").unwrap();
+    for (name, set) in trailed.effects() {
+        let (before, after) = (trailed.emitters(set), fixed.emitters(set));
+        assert_eq!(before.len(), after.len(), "{name}");
+        for (b, a) in before.iter().zip(after) {
+            assert_eq!(b.name, a.name);
+            for (i, (x, y)) in b.attrs.iter().zip(&a.attrs).enumerate() {
+                if i != shader {
+                    assert_eq!(x, y, "{name} {} {}", b.name, fields::table()[i].id);
+                }
+            }
+        }
+    }
+}

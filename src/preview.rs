@@ -117,10 +117,12 @@ impl Preview {
             let mut spawned = spawns_moving(&sim, self.age, seed, self.swing.then_some(&travelled as &dyn Fn(f32) -> f32));
             if self.swing {
                 // Particles that stay where they were born keep the swing's position at their birth; the rest go
-                // round with it. Positions are in the emitter's own frame, so the move is taken into it.
+                // round with it. Positions are in the emitter's own frame, so the move is taken into it. Only a shader
+                // that reads the birth matrix keeps them there in the game, so with any other they go round too.
                 let into_emitter = local.inverse();
+                let stays = sim.follow_type == 1 && doc.shader_reads_birth(game.shader_index).unwrap_or(true);
                 for spawn in &mut spawned {
-                    let at = if sim.follow_type == 1 { spawn.birth } else { self.age };
+                    let at = if stays { spawn.birth } else { self.age };
                     spawn.position += into_emitter.transform_vector3(swing_at(at));
                 }
             }

@@ -76,6 +76,14 @@ Smash builds trails (Roy's and Ike's fire) from distance emission plus particles
 **Trail** section turns both on for a layer. A trail only draws when the move's script attaches the effect to a bone
 that moves (`EFFECT_FOLLOW` on a hand). Tick **Swing** under the preview to move the effect round and see it.
 
+Whether particles stay where they were born is compiled into the layer's shader, not just the follow type: a trail
+layer needs a shader that reads the emitter's matrix at birth, and a layer that rides its bone needs one that doesn't.
+On the wrong one, the game ignores the follow type. So ticking the trail on or off also moves the layer to a shader
+that matches, one the file has or, failing that, one copied from the game's own effects (choose the game files folder
+first). A layer that is already on the wrong one says so in the panel, with **Fix the shader**; **File > Fix trail
+shaders** fixes every layer of the file at once. Only `shader_references.shader_index` changes. **Swing** shows a
+trail only when the shader would draw one in game.
+
 ## Seeing a layer's model
 
 Under the preview, **Outline** draws a yellow line round the selected layer. **Ghost** draws the selected layer's
@@ -122,4 +130,6 @@ and fades (`src/app/recipes.json`).
 - `effect_forge rename <file.eff> <out.eff> <OLD> <NEW>` is the Rename button. `project <p.forge> <from.eff> [export
   to]` starts a project, `folder <p.forge> <folder> <EFFECT...>` puts effects in a folder, and `export <p.forge> [to]`
   exports as the window does.
+- `effect_forge trail-shaders <file.eff> [<out.eff> [EFFECT]]` lists layers whose shader doesn't match their follow
+  type; with `<out.eff>` it writes the file with them fixed, as **Fix trail shaders** does.
 - `effect_forge layers <file.eff> [EFFECT]` lists each effect's type and layers, with their textures and models.

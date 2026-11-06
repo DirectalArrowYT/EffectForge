@@ -267,6 +267,30 @@ fn main() {
         return;
     }
     let sweep = args.first().is_some_and(|a| a == "sweep");
+    // trail-shaders <eff> [<out.eff> [<effect>]]: layers whose shader doesn't match how they follow their bone; with
+    // <out>, fixed
+    if let ["trail-shaders", eff, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let doc = engine::Doc::open(Path::new(eff)).expect("the file opens");
+        let started = std::time::Instant::now();
+        let (fixed, found) = match rest {
+            [] => (None, doc.trail_mismatches(None)),
+            [_, only @ ..] => {
+                let (fixed, found) = doc.fix_trail_shaders(only.first().copied()).expect("fixing");
+                (Some(fixed), found)
+            }
+        };
+        for m in &found {
+            println!("{:<40} {:<28} follow {} shader {:>4}: {}", m.effect, m.name, m.follow_type, m.shader, m.fix.as_deref().unwrap_or("-"));
+        }
+        let fixable = found.iter().filter(|m| m.fix.is_some()).count();
+        println!("{} layers don't match their shader", found.len());
+        if let (Some(fixed), [out, ..]) = (fixed, rest) {
+            std::fs::write(out, &fixed.bytes).expect("writing");
+            let left = fixed.trail_mismatches(None).len();
+            println!("{fixable} fixed in {:.1}s, wrote {out}; {left} left in it", started.elapsed().as_secs_f32());
+        }
+        return;
+    }
     // import <into.eff> <from.eff> <out.eff> [replace] <EFFECT or PREFIX*...>
     if let ["import", into, from, out, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         let replace = rest.first() == Some(&"replace");

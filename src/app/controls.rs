@@ -261,6 +261,8 @@ impl App {
         if want != on {
             self.set(em, "emission.is_emit_dist_enabled", if want { 1.0 } else { 0.0 });
             self.set(em, "emitter_info.follow_type", if want { 1.0 } else { 0.0 });
+            // the shader has to match, which can only be seen to once the change is in
+            self.trail_fix = self.effect.as_ref().map(|e| e.0.clone());
             if want {
                 self.set(em, "emission.is_one_time", 0.0);
                 self.set(em, "emission.interval", 0.0);
