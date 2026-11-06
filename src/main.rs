@@ -85,9 +85,25 @@ fn main() {
         return;
     }
     // A value on every layer of an effect, to try something in game: set <eff> <out> <effect> <attribute> <value>
-    if let ["set", eff, out, wanted, id, value] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        let doc = engine::Doc::open(Path::new(eff)).unwrap();
-        std::fs::write(out, &doc.set_on_effect(wanted, id, value).unwrap().bytes).unwrap();
+    // set <eff> <out> <effect> [layer number] <name=value>...: a panel name (size, colour, turn-z...) sets what that
+    // control sets, anything else is a field id; `set <eff> <out> <effect> <id> <value>` still works
+    if let ["set", eff, out, wanted, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let (layer, sets): (Option<&str>, Vec<(&str, &str)>) = match rest {
+            [id, value] if !id.contains('=') && !value.contains('=') => (None, vec![(*id, *value)]),
+            [first, more @ ..] if !first.contains('=') => (Some(*first), more.iter().map(|s| s.split_once('=').unwrap_or((s, ""))).collect()),
+            all => (None, all.iter().map(|s| s.split_once('=').unwrap_or((s, ""))).collect()),
+        };
+        if sets.is_empty() || sets.iter().any(|(_, v)| v.is_empty()) {
+            let names: Vec<String> = engine::PANEL_NAMES.iter().map(|(n, what)| format!("  {n}: {what}")).collect();
+            fail(&format!("set <eff> <out> <effect> [layer number] <name=value>...; the panel's names:\n{}", names.join("\n")));
+        }
+        let only = layer.map(|l| l.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail(&format!("layer {l}: a number from 1"))) - 1);
+        let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+        let (doc, report) = doc.set_values(wanted, only, &sets).unwrap_or_else(|e| fail(&format!("{e:#}")));
+        for line in report {
+            println!("{line}");
+        }
+        std::fs::write(out, &doc.bytes).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
         return;
     }
     // Give a layer (or every layer) of an effect a shader built for a mode, as the panel does:
@@ -236,8 +252,22 @@ fn main() {
     }
     // Values across a whole file, to see how the game's own effects use a field: attrs <eff> <id,id,...> [id=value filter]
     if let ["attrs", eff, ids, rest @ ..] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        let doc = engine::Doc::open(Path::new(eff)).unwrap();
+        if ids.contains('=') {
+            fail(&format!("attrs reads values ({ids} looks like setting one); to set: set <eff> <out> <effect> [layer number] {ids}"));
+        }
+        if rest.len() > 1 || rest.first().is_some_and(|f| !f.contains('=')) {
+            fail("attrs <eff> <id,id,...> [id=value to list only layers with that value]");
+        }
+        let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
         let filter = rest.first().and_then(|f| f.split_once('='));
+        let known = |id: &str| doc.effects().iter().any(|(_, set)| doc.emitters(*set).iter().any(|em| engine::attr(em, id).is_some()));
+        for id in ids.split(',').chain(filter.map(|(id, _)| id)) {
+            if !known(id) {
+                let tail = id.rsplit('.').next().unwrap_or(id);
+                let near: Vec<&str> = eff::fields::table().iter().map(|a| a.id).filter(|f| f.contains(tail)).take(8).collect();
+                fail(&format!("no field {id}{}", if near.is_empty() { String::new() } else { format!("; near: {}", near.join(", ")) }));
+            }
+        }
         for (name, set) in doc.effects() {
             for emitter in doc.emitters(set) {
                 let value = |id: &str| engine::attr(emitter, id).map(|v| v.as_f32());
@@ -399,20 +429,39 @@ fn main() {
     }
     // shot <eff> <effect> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or - for all] [camera turn] [camera tilt] [half view] [swing]
     let shot = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["shot", _, _, out, frame, rest @ ..] => Some(app::Shot {
+        ["shot", eff, effect, out, frame, rest @ ..] => {
+            // layers count from 1 here as everywhere else; one the effect doesn't have would shoot an empty frame
+            let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+            let (_, set) = doc.find(effect).unwrap_or_else(|e| fail(&format!("{e:#}")));
+            let count = doc.emitters(set).len();
+            let number = |l: &str| match l.parse::<usize>() {
+                Ok(n) if (1..=count).contains(&n) => n - 1,
+                _ => fail(&format!("layer {l}: {effect} has layers 1 to {count}")),
+            };
+            let pick = rest.first().copied().filter(|l| *l != "-");
+            Some(app::Shot {
             out: out.into(),
-            frame: frame.parse().expect("a frame number"),
-            layer: rest.first().filter(|l| **l != "-" && !l.starts_with(['o', 'g'])).map(|l| l.parse().expect("a layer number")),
-            outline: rest.first().and_then(|l| l.strip_prefix('o')).map(|l| l.parse().expect("a layer number")),
-            ghost: rest.first().and_then(|l| l.strip_prefix('g')).map(|l| l.parse().expect("a layer number")),
+            frame: frame.parse().unwrap_or_else(|_| fail(&format!("frame {frame}: a number"))),
+            layer: pick.filter(|l| !l.starts_with(['o', 'g'])).map(number),
+            outline: pick.and_then(|l| l.strip_prefix('o')).map(number),
+            ghost: pick.and_then(|l| l.strip_prefix('g')).map(number),
             orbit: [rest.get(1), rest.get(2)].map(|v| v.map_or(0.0, |v| v.parse().expect("an angle"))),
             view: rest.get(3).map_or(preview::HALF_VIEW, |v| v.parse().expect("a view size")),
             swing: rest.get(4).is_some_and(|v| *v == "swing"),
             settled: 0,
-        }),
+        })
+        }
         _ => None,
     };
     let args = if sweep || shot.is_some() { &args[1..] } else { &args[..] };
+    // the window opens on a file, or on nothing; a command it didn't recognise (or one short of what it takes) says so
+    // instead, so a script never finds itself waiting on a window
+    if let Some(first) = args.first().filter(|_| !sweep && shot.is_none()) {
+        if !Path::new(first).is_file() {
+            fail(&format!("{first}: not a file, and not a command with these arguments ({} given). Commands: {}. \
+                The README lists each with its arguments.", args.len() - 1, COMMANDS.join(", ")));
+        }
+    }
     let open = args.first().map(std::path::PathBuf::from);
     let mut gpu = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut gpu.wgpu_setup {
@@ -430,6 +479,19 @@ fn main() {
         ..Default::default()
     };
     eframe::run_native("Effect Forge", options, Box::new(|cc| Ok(Box::new(app::App::new(open, args.get(1).cloned(), sweep, shot, cc))))).expect("the window opens");
+}
+
+/// Every command, for the message when one doesn't match.
+const COMMANDS: [&str; 29] = [
+    "stage", "info", "caps", "colour2", "set", "borrow", "merge-tuned", "stage-effect", "layers", "attrs", "dump", "check",
+    "trail-shaders", "style", "import", "sweep", "shot", "kit", "new-effect", "add-layer", "remove-layer",
+    "duplicate-layer", "value", "texture", "model", "rename", "project", "folder", "export",
+];
+
+/// A command line that can't be carried out: say why and stop (never falling through to the window).
+fn fail(why: &str) -> ! {
+    eprintln!("{why}");
+    std::process::exit(2);
 }
 
 /// Run one of every edit on a copy of a file, and read each back.

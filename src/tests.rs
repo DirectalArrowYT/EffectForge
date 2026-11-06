@@ -47,7 +47,7 @@ fn open(path: &PathBuf) -> Doc {
 fn set_gives_the_same_bytes() {
     let Some(path) = pit() else { return };
     let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    let doc = open(&path).set_on_effect("PIT_GUARDIAN_SHIELD", "particle_data.life", "30").unwrap();
+    let doc = open(&path).set_values("PIT_GUARDIAN_SHIELD", None, &[("particle_data.life", "30")]).unwrap().0;
     assert_eq!(fnv(&doc.bytes), 0x2790c92a3172fbf0);
     let (_, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
     for emitter in doc.emitters(set) {
@@ -155,6 +155,30 @@ fn a_turn_borrows_a_shader_that_reads_it() {
     assert!(!report[0].ends_with("already"), "{}", report[0]);
     assert!(reads(&turned, layer), "{}", report[0]);
     assert!(!turned.turn_ignored(&turned.emitters(set)[layer]));
+}
+
+/// The panel's names set what its controls set: Colour takes Colour 2 along only while they match, hex and degrees
+/// read as the panel shows them, and a bad value says what it wants.
+#[test]
+fn panel_names_set_what_the_controls_set() {
+    use engine::panel_values;
+    let matching = |_: &str| Some(1.0);
+    let set = |value: &dyn Fn(&str) -> Option<f32>, name, text| -> std::collections::BTreeMap<String, f32> {
+        panel_values(value, name, text).unwrap().into_iter().collect()
+    };
+    let red = set(&matching, "colour", "#ff0000");
+    assert_eq!(red["particle_color.color0_r"], 1.0);
+    assert_eq!(red["emitter_static.color0.keys[0].y"], 0.0);
+    assert_eq!(red["particle_color.color1_g"], 0.0, "Colour 2 follows while they match");
+    let apart = |id: &str| Some(if id.starts_with("particle_color.color1") { 0.5 } else { 1.0 });
+    assert!(!set(&apart, "colour", "1,0,0").contains_key("particle_color.color1_r"));
+    let turned = set(&matching, "turn-z", "90");
+    assert!((turned["emitter_static.rotate_init_z"] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(turned["particle_data.is_rotate_z"], 1.0);
+    assert_eq!(set(&matching, "speed", "2")["emitter_static.tex_pattern_anim0.frequency"], 0.5);
+    assert_eq!(set(&matching, "over", "1")["render_state.is_depth_test"], 0.0);
+    assert!(panel_values(&matching, "colour", "1,0").is_err());
+    assert!(panel_values(&matching, "spin-w", "1").is_err());
 }
 
 /// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is

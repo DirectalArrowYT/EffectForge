@@ -1261,6 +1261,94 @@ pub fn texture_pixels(mut image: image::RgbaImage, how: TextureFrom) -> (image::
     (image, notes)
 }
 
+/// The panel's own controls by name, for the command line: what each takes and what it does.
+pub const PANEL_NAMES: [(&str, &str); 16] = [
+    ("size", "size on every axis"),
+    ("size-varies", "each particle up to this many % smaller"),
+    ("colour", "r,g,b (0 to 1) or #rrggbb, where the texture is bright; Colour 2 follows while they match"),
+    ("colour2", "r,g,b or #rrggbb, where the texture is dark"),
+    ("brightness", "multiplies the colour; above 1 glows"),
+    ("opacity", "0 to 1"),
+    ("speed", "animated texture speed, 1 the game's normal"),
+    ("over", "1 draws over the stage"),
+    ("glow", "1 is additive"),
+    ("turn-x", "start angle in degrees about X; borrows a shader that turns when needed"),
+    ("turn-y", "start angle in degrees about Y"),
+    ("turn-z", "start angle in degrees about Z"),
+    ("spin-x", "degrees a frame about X"),
+    ("spin-y", "degrees a frame about Y"),
+    ("spin-z", "degrees a frame about Z"),
+    ("roll-random", "each particle starts turned up to this many degrees either way about Z"),
+];
+
+/// The fields one of the panel's controls (see [`PANEL_NAMES`]) sets to `text`, for a layer whose values are `value`.
+pub fn panel_values(value: &dyn Fn(&str) -> Option<f32>, name: &str, text: &str) -> Result<Vec<(String, f32)>> {
+    let number = || text.parse::<f32>().map_err(|_| anyhow!("{name}={text}: a number"));
+    let rgb = || -> Result<[f32; 3]> {
+        if let Some(hex) = text.strip_prefix('#').filter(|h| h.len() == 6) {
+            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map(|b| b as f32 / 255.0);
+            return Ok([byte(0)?, byte(2)?, byte(4)?]);
+        }
+        let parts: Vec<f32> = text.split(',').map(str::parse).collect::<Result<_, _>>()
+            .map_err(|_| anyhow!("{name}={text}: r,g,b or #rrggbb"))?;
+        parts.try_into().map_err(|_| anyhow!("{name}={text}: three numbers, r,g,b"))
+    };
+    let colour = |which: &str, rgb: [f32; 3]| -> Vec<(String, f32)> {
+        let mut out = Vec::new();
+        for (i, (channel, axis)) in [("r", "x"), ("g", "y"), ("b", "z")].into_iter().enumerate() {
+            out.push((format!("particle_color.{which}_{channel}"), rgb[i]));
+            out.push((format!("emitter_static.{which}.keys[0].{axis}"), rgb[i]));
+        }
+        if which == "color1" {
+            // a shader built for animated colour reads every key, and a fixed colour leaves the rest black
+            out.push(("particle_color.color1_type".into(), 2.0));
+            out.push(("emitter_static.num_color1_keys".into(), 1.0));
+        }
+        out
+    };
+    let flag = |on: bool| if on { 1.0 } else { 0.0 };
+    Ok(match name {
+        "size" => ["x", "y", "z"].map(|a| (format!("particle_scale.scale_{a}"), 0.0)).into_iter().map(|(id, _)| Ok((id, number()?))).collect::<Result<_>>()?,
+        "size-varies" => ["x", "y", "z"].into_iter().map(|a| Ok((format!("particle_scale.scale_random_{a}"), number()?))).collect::<Result<_>>()?,
+        "colour" => {
+            let rgb = rgb()?;
+            let together = ["r", "g", "b"].iter().all(|c| {
+                (value(&format!("particle_color.color1_{c}")).unwrap_or(1.0) - value(&format!("particle_color.color0_{c}")).unwrap_or(1.0)).abs() < 1e-3
+            });
+            let mut out = colour("color0", rgb);
+            if together {
+                out.extend(colour("color1", rgb));
+            }
+            out
+        }
+        "colour2" => colour("color1", rgb()?),
+        "brightness" => vec![("emitter_static.color_scale".into(), number()?)],
+        "opacity" => {
+            let a = number()?;
+            let mut out = vec![("particle_color.alpha0".to_string(), a)];
+            out.extend(["x", "y", "z"].map(|axis| (format!("emitter_static.alpha0.keys[0].{axis}"), a)));
+            out
+        }
+        "speed" => {
+            let speed = number()?;
+            if speed <= 0.0 {
+                return Err(anyhow!("speed={text}: above 0"));
+            }
+            vec![("emitter_static.tex_pattern_anim0.frequency".into(), 1.0 / speed)]
+        }
+        "over" => vec![("render_state.is_depth_test".into(), flag(number()? == 0.0))],
+        "glow" => vec![("render_state.blend_type".into(), flag(number()? != 0.0))],
+        "roll-random" => vec![("emitter_static.rotate_init_rand_z".into(), number()?.to_radians()), ("particle_data.is_rotate_z".into(), 1.0)],
+        _ => match name.split_once('-') {
+            Some((how @ ("turn" | "spin"), axis @ ("x" | "y" | "z"))) => {
+                let field = if how == "turn" { "rotate_init" } else { "rotate_add" };
+                vec![(format!("emitter_static.{field}_{axis}"), number()?.to_radians()), (format!("particle_data.is_rotate_{axis}"), 1.0)]
+            }
+            _ => return Err(anyhow!("{name} isn't one of the panel's names")),
+        },
+    })
+}
+
 /// The vertex input that carries a particle's start angle; a shader that doesn't read it draws every particle unturned.
 pub const ROTATION_INPUT: &str = "sysInitRotateAttr";
 
@@ -1289,18 +1377,55 @@ impl Doc {
     }
 
     /// One value on every layer of an effect (`effect_forge set`). `value` is read as the field's own type.
-    pub fn set_on_effect(&self, effect: &str, id: &str, value: &str) -> Result<Self> {
-        let (_, set) = self.find(effect)?;
-        let mut pending = Pending::new();
-        for (index, emitter) in self.emitters(set).iter().enumerate() {
-            let new = match attr(emitter, id).ok_or_else(|| anyhow!("no field {id} on {}", emitter.name))? {
-                AttrValue::Float(_) => AttrValue::Float(value.parse()?),
-                AttrValue::Int(_) => AttrValue::Int(value.parse()?),
-                AttrValue::UInt(_) => AttrValue::UInt(value.parse()?),
-            };
-            pending.entry((set, index)).or_default().insert(id.to_string(), new);
+    /// Layer `only` of an effect, or every layer, with each `name=value` set: a panel name ([`PANEL_NAMES`]) sets
+    /// what that control sets, anything else is a field id. A layer left turning on a shader that can't is given one
+    /// that can, as the panel does. Says what it did, a line a layer.
+    pub fn set_values(&self, effect: &str, only: Option<usize>, sets: &[(&str, &str)]) -> Result<(Self, Vec<String>)> {
+        let (entry, set) = self.find(effect)?;
+        let count = self.emitters(set).len();
+        if only.is_some_and(|o| o >= count) {
+            return Err(anyhow!("{effect} has layers 1 to {count}"));
         }
-        self.apply_values(&pending)
+        let mut pending = Pending::new();
+        let mut report = Vec::new();
+        for (index, emitter) in self.emitters(set).iter().enumerate().filter(|(i, _)| only.is_none_or(|o| o == *i)) {
+            let value = |id: &str| attr(emitter, id).map(|v| v.as_f32());
+            let values = pending.entry((set, index)).or_default();
+            let mut changed = Vec::new();
+            for (name, text) in sets {
+                let fields = if PANEL_NAMES.iter().any(|(n, _)| n == name) {
+                    panel_values(&value, name, text)?
+                } else {
+                    vec![(name.to_string(), text.parse::<f32>().map_err(|_| anyhow!("{name}={text}: a number"))?)]
+                };
+                for (id, v) in fields {
+                    let like = attr(emitter, &id).ok_or_else(|| {
+                        anyhow!("{} has no field {id} (a panel name is one of: {})", emitter.name,
+                            PANEL_NAMES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "))
+                    })?;
+                    values.insert(id.clone(), typed(like, v));
+                    changed.push(id);
+                }
+            }
+            changed.dedup();
+            report.push(format!("{}: {}", emitter.name, changed.join(" ")));
+        }
+        let mut doc = self.apply_values(&pending)?;
+        for index in (0..count).filter(|i| only.is_none_or(|o| o == *i)) {
+            if doc.turn_ignored(&doc.emitters(set)[index]) {
+                let axis = ["x", "y", "z"].into_iter()
+                    .find(|a| attr(&doc.emitters(set)[index], &format!("particle_data.is_rotate_{a}")).is_some_and(|v| v.as_f32() != 0.0))
+                    .unwrap_or("z");
+                let (next, found) = doc.reshade(&entry, set, index, &[(&format!("particle_data.is_rotate_{axis}"), 1.0)], &[])?;
+                let name = doc.emitters(set)[index].name.clone();
+                report.push(match found {
+                    Some(found) => format!("{name}: turns, so it draws with the shader of {}", found.from),
+                    None => format!("{name}: no shader that turns was found, so it draws unturned"),
+                });
+                doc = next;
+            }
+        }
+        Ok((doc, report))
     }
 
     /// Layer `only` of an effect, or every layer, set to `id = value` and drawing with a shader built for it, found

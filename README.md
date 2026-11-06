@@ -158,8 +158,14 @@ and fades (`src/app/recipes.json`).
 - Crashes, GPU errors and the effect on screen go to `forge_data/forge.log` beside the executable (or under
   `EFFECT_FORGE_CACHE_DIR` when that is set).
 - `effect_forge sweep <file.eff>` draws every effect early, midway and late, makes one edit, and logs anything that fails.
-- `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes.
-- `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field.
+- `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes. Layers count from 1, as everywhere; turn and tilt are radians.
+- `effect_forge set <file.eff> <out.eff> <EFFECT> [layer number] <name=value>...` sets values on one layer or all of
+  them. A name is a field id or one of the panel's controls, which set what the control sets: `size`, `size-varies`,
+  `colour` and `colour2` (`r,g,b` from 0 to 1, or `#rrggbb`; Colour 2 follows Colour while they match), `brightness`,
+  `opacity`, `speed`, `over`, `glow`, `turn-x|y|z` (degrees), `spin-x|y|z` (degrees a frame) and `roll-random`
+  (degrees). A layer left turning on a shader that can't turn borrows one that can. `set` alone lists the names.
+- Any command given the wrong arguments says so and stops; only a file (or nothing) opens the window.
+- `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field (only layers with that value, when one is given). An unknown id is an error naming close ones.
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
 - `effect_forge caps <file.eff> <EFFECT|*> [layer number]` prints each layer's shader: the inputs it reads and the
   values compiled into it, and says when a layer is set to turn but its shader draws it unturned. `*` is every effect.
