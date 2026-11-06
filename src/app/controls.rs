@@ -34,10 +34,23 @@ const FADES: [(&str, &[(f32, f32)]); 4] = [
 const ALPHA_TYPE: &str = "particle_color.alpha0_type";
 const BILLBOARD: &str = "particle_data.billboard_type";
 
-/// A layer drawing with another layer's shader: where from, and the values to put back.
+/// A layer drawing with another layer's shader: where from, the values to put back, and of those the ones its own
+/// shader is built for (looked for again on the way back).
 pub struct Borrowed {
-    from: String,
-    undo: Vec<(String, f32)>,
+    pub(super) from: String,
+    pub(super) undo: Vec<(String, f32)>,
+    pub(super) modes: Vec<(String, f32)>,
+}
+
+/// A shader to look for once values just set are in: for layer `layer` of set `set` (played by `entry`), one built
+/// for `want`. `back` when this goes back to the layer's own look, otherwise the values `want` replaced.
+pub struct Reshade {
+    pub(super) entry: String,
+    pub(super) set: usize,
+    pub(super) layer: usize,
+    pub(super) want: Vec<(String, f32)>,
+    pub(super) what: String,
+    pub(super) back: Option<Vec<(String, f32)>>,
 }
 
 /// How one of Smash's own layers behaves, from `recipes.json` (made by gen_recipes.py from the game's files).
@@ -180,12 +193,13 @@ impl App {
             let on = self.value(em, BILLBOARD) == Some(5.0);
             let mut want = on;
             ui.checkbox(&mut want, "Stretch along motion").on_hover_text(
-                "Each particle faces the camera but stretches the way it moves, like hit sparks. Borrows the shader of a \
-                 layer in this file that draws this way.");
-            if want != on && self.need_modes(em, &[(BILLBOARD, if want { 5.0 } else { 0.0 })], "Stretch along motion")
-                && want && self.value(em, "emitter_static.add_vel_to_scale").unwrap_or(0.0) <= 0.0
-            {
-                self.set(em, "emitter_static.add_vel_to_scale", 1.0);
+                "Each particle faces the camera but stretches the way it moves, like hit sparks. Borrows the nearest \
+                 shader that draws this way, from this file or the game's.");
+            if want != on {
+                self.need_modes(em, &[(BILLBOARD, if want { 5.0 } else { 0.0 })], "Stretch along motion");
+                if want && self.value(em, "emitter_static.add_vel_to_scale").unwrap_or(0.0) <= 0.0 {
+                    self.set(em, "emitter_static.add_vel_to_scale", 1.0);
+                }
             }
             if on {
                 self.slider(ui, em, "emitter_static.add_vel_to_scale", 0.0..=4.0, "Stretch amount", "How much longer a particle gets for its speed.");
@@ -306,41 +320,21 @@ impl App {
     }
 
     /// Make sure the layer's shader is built for `want`. Some fields (billboard, alpha type) are compiled into each
-    /// layer's shader, so changing the value alone does nothing; this borrows the shader of a layer in the same file
-    /// that draws the same look with those modes. False, with a note, when no layer can lend one.
-    fn need_modes(&mut self, em: &EmitterDef, want: &[(&str, f32)], what: &str) -> bool {
+    /// layer's shader, so changing the value alone does nothing: the values are set, and once they are in, the layer
+    /// moves to the nearest shader in the file or the game that is built for them (see [`crate::engine::Doc::reshade`]).
+    fn need_modes(&mut self, em: &EmitterDef, want: &[(&str, f32)], what: &str) {
         if want.iter().all(|(id, v)| self.value(em, id).map_or(true, |c| c == *v)) {
-            return true;
+            return;
         }
-        let (Some(doc), Some((entry, set_idx))) = (self.doc.clone(), self.effect.clone()) else { return false };
-        let Some(donor) = doc.shader_donor(&entry, em, want, |id| self.value(em, id)) else {
-            self.status = format!("{what}: no layer in this file draws this texture and blend that way, so the shader \
-                                   can't show it. It is set, but the preview and the game won't change.");
-            return false;
-        };
-        let key = (set_idx, self.emitter);
-        let ids = std::iter::once("shader_references.shader_index").chain(want.iter().map(|(id, _)| *id));
-        let old: Vec<_> = ids.filter_map(|id| Some((id.to_string(), self.value(em, id)?))).collect();
-        // Undo goes back to the layer's own shader, however many times it borrowed since.
-        let undo = match self.borrowed.remove(&key) {
-            Some(mut earlier) => {
-                for (id, v) in old {
-                    if !earlier.undo.iter().any(|(i, _)| *i == id) {
-                        earlier.undo.push((id, v));
-                    }
-                }
-                earlier.undo
-            }
-            None => old,
-        };
-        self.set(em, "shader_references.shader_index", donor.shader_index);
+        let Some((entry, set)) = self.effect.clone() else { return };
+        let back = want.iter().filter_map(|(id, _)| Some((id.to_string(), self.value(em, id)?))).collect();
         for (id, v) in want {
             self.set(em, id, *v);
         }
-        let from = format!("{} / {}", donor.effect, donor.layer);
-        self.status = format!("{what}: now drawing with the shader of {from}.");
-        self.borrowed.insert(key, Borrowed { from, undo });
-        true
+        self.reshade = Some(Reshade {
+            entry, set, layer: self.emitter, what: what.to_string(), back: Some(back),
+            want: want.iter().map(|(id, v)| (id.to_string(), *v)).collect(),
+        });
     }
 
     /// Says which layer's shader this one borrowed, with a way back.
@@ -349,13 +343,16 @@ impl App {
         let Some(from) = self.borrowed.get(&key).map(|b| b.from.clone()) else { return };
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(Color32::from_rgb(140, 200, 255), format!("Draws with the shader of {from}."))
-                .on_hover_text("Some looks (stretching, fading) are compiled into a layer's shader, so this layer uses one \
-                                from a layer that draws the same texture and blend that way.");
+                .on_hover_text("Some looks (stretching, fading) are compiled into a layer's shader, so this layer uses the \
+                                nearest one that draws that way. Use its own puts back what changed for it.");
             if ui.small_button("Use its own").clicked() {
                 if let Some(b) = self.borrowed.remove(&key) {
-                    for (id, v) in b.undo {
-                        self.set(em, &id, v);
+                    for (id, v) in &b.undo {
+                        self.set(em, id, *v);
                     }
+                    // its own shader may have left the file, so the nearest to its old look is found again
+                    let (entry, set) = self.effect.clone().expect("an effect");
+                    self.reshade = Some(Reshade { entry, set, layer: self.emitter, want: b.modes, what: "Its own look".into(), back: None });
                 }
             }
         });
@@ -414,7 +411,7 @@ impl App {
         if !has_mesh && (recipe.billboard == 5.0) != (billboard == 5.0) {
             want.push((BILLBOARD, if recipe.billboard == 5.0 { 5.0 } else { 0.0 }));
         }
-        let modes_ok = self.need_modes(em, &want, &recipe.name);
+        self.need_modes(em, &want, &recipe.name);
         let recipe_top = recipe.values.iter()
             .filter(|(id, _)| id.starts_with("emitter_static.alpha0.keys") && !id.ends_with(".time"))
             .map(|(_, v)| *v).fold(0.0, f32::max).max(0.01);
@@ -433,11 +430,7 @@ impl App {
             self.write_keys(em, "emitter_static.alpha0", "emitter_static.num_alpha0_keys", &[(0.0, [top; 3])]);
             self.set(em, "particle_color.alpha0", top);
         }
-        self.status = if modes_ok {
-            format!("Behaves like {} ({}). Texture, colour and size kept.", recipe.name, recipe.source)
-        } else {
-            format!("Behaves like {}, but {}", recipe.name, self.status)
-        };
+        self.status = format!("Behaves like {} ({}). Texture, colour and size kept.", recipe.name, recipe.source);
     }
 
     /// Every field, in the format's own groups.

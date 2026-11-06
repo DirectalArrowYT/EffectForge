@@ -127,9 +127,12 @@ code it replaced (`cargo test --release` pins them).
 
 Each layer draws with a shader compiled for it, and some fields are compiled in: the billboard type (stretching along
 motion is type 5) and the opacity type (fixed, or keyed over life). Changing those values alone does nothing on screen
-or in game. So the panel borrows a shader: it finds a layer in the same file with the same texture setup and blend that
-already draws that way, and points this layer at its shader (`shader_references.shader_index`). The panel says whose
-shader a layer uses, with **Use its own** to undo it. The fade presets, Taper, **Stretch along motion** and
+or in game. So the panel borrows a shader: once the value is in, it finds the shader nearest this layer's setup that
+draws that way, in the same file first and then in the game's files (copied in when it comes from another file), and
+points this layer at it (`shader_references.shader_index`). The values that must agree for it to draw the same are kept;
+when the nearest shader also needs a few others (a texture's animation, how its channels combine), the layer takes them
+and the status line names them. The panel says whose shader a layer uses, with **Use its own** to put back the values
+and find the shader for its own look again. The fade presets, Taper, **Stretch along motion**, **Draw style** and
 **Behave like...** all borrow when they need to. **Behave like...** copies how one of Smash's own layers moves, lives
 and fades (`src/app/recipes.json`).
 
@@ -144,12 +147,13 @@ and fades (`src/app/recipes.json`).
   (blank pieces with only their own values, and a draw style changing only what it must). They read the extracted arc
   (`FORGE_TEST_PIT`, `FORGE_TEST_COMMON`).
 
-- Crashes, GPU errors and the effect on screen go to `%APPDATA%/EffectForge/forge.log`.
+- Crashes, GPU errors and the effect on screen go to `forge_data/forge.log` beside the executable (or under
+  `EFFECT_FORGE_CACHE_DIR` when that is set).
 - `effect_forge sweep <file.eff>` draws every effect early, midway and late, makes one edit, and logs anything that fails.
 - `effect_forge shot <file.eff> <EFFECT> <out.png> <frame> [layer number, o<number> to outline it, g<number> to ghost its model, or -] [camera turn] [camera tilt] [half view] [swing]` saves the window's own frame and closes.
 - `effect_forge attrs <file.eff> <id,id,...> [id=value]` prints values across a whole file, to see how the game's own effects use a field.
 - `effect_forge dump <file.eff> <out.jsonl>` writes every layer's values, one JSON line per layer.
-- `effect_forge borrow <file.eff> <out.eff> <EFFECT> <field> <value>` borrows a shader for every layer of an effect, as the panel does, and prints whose.
+- `effect_forge borrow <file.eff> <out.eff> <EFFECT> [layer number] <field> <value>` sets a field the shader is built for on every layer of an effect (or one), borrowing a shader as the panel does, and prints whose and what else each layer took.
 - `effect_forge stage-effect <file.eff> <EFFECT>` is the Keep my tuning button.
 - `effect_forge kit` lists the starter kit; `new-effect <file.eff> <out.eff> <NAME> <piece> [model.glb]`, `add-layer <file.eff>
   <out.eff> <EFFECT> <piece> [model.glb]` and `remove-layer <file.eff> <out.eff> <EFFECT> <layer number>` are its buttons

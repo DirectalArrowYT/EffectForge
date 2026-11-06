@@ -75,8 +75,7 @@ pub fn rebuild(
     // there is no unreferenced-texture bloat here to collect, while a prune this late could drop
     // a pool texture that an authored swap or an import below is about to name.
     clear_unreachable_emitter_sets(&mut namco);
-    compact_shader_containers(&mut namco)?;
-    verify_shader_indices_resolve(&namco, "eff export")?;
+    // (compaction itself waits until the edits below have run: see after the spawn edits)
 
     // Added textures before the authored edits (a swap resolves its target by name, so it has to exist first), replacements
     // after (they land on whichever texture will actually be sampled), removals last (the swaps
@@ -108,6 +107,12 @@ pub fn rebuild(
     // Apply this after spawn edits too: an entry edit can deliberately repoint a kind or part
     // at the roster-cleared set, and that must not reintroduce the unsafe zero-emitter handle.
     clear_empty_emitter_set_references(&mut namco);
+    // Compaction after every edit, never before: an edit can move a layer onto another shader (the one it left may
+    // now be unused) and a roster can drop a layer that came in only for its shader. Compacting first would renumber
+    // the library under the indices those edits carry; compacting last leaves every rebuilt file with nothing
+    // unused, so the indices read from it still hold for the next rebuild.
+    compact_shader_containers(&mut namco)?;
+    verify_shader_indices_resolve(&namco, "eff export")?;
     apply_texture_imports(&mut namco, &eff.textures, &mut warnings)?;
     apply_texture_removals(&mut namco, &eff.textures_removed, &mut warnings)?;
     for warning in &warnings {

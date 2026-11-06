@@ -832,16 +832,8 @@ pub fn mirror(mesh: &mut MeshData, axis: usize) {
     }
 }
 
-/// A layer elsewhere in the file whose shader can stand in for another's.
-#[derive(Clone, Debug)]
-pub struct Donor {
-    pub effect: String,
-    pub layer: String,
-    pub shader_index: f32,
-}
-
 /// Fields the shader translator bakes in (or may: only billboard and alpha0 type are proven), so a layer can only
-/// change them by drawing with another layer's shader. Donors are ranked by how many of these they share.
+/// change them by drawing with another layer's shader.
 pub const BAKED_MODES: &[&str] = &[
     "particle_data.billboard_type", "particle_color.alpha0_type", "particle_color.alpha1_type",
     "particle_color.color0_type", "particle_color.color1_type", "particle_color.is_soft_particle",
@@ -973,13 +965,22 @@ impl Doc {
     /// layer. Returns where the shader came from and the fields taken with it, or None (and the file as it was) when
     /// no file has one.
     pub fn restyle(&self, entry: &str, set_idx: usize, layer: usize, style: &Style, value: f32) -> Result<(Self, Option<Restyled>)> {
+        let em = self.emitters(set_idx).get(layer).ok_or_else(|| anyhow!("no layer {layer} in {entry}"))?;
+        if attr(em, style.field).map(|v| v.as_f32()) == Some(value) {
+            return Ok((Self::from_bytes(self.path.clone(), self.bytes.clone())?, Some(Restyled { from: "its own".into(), taken: Vec::new() })));
+        }
+        self.reshade(entry, set_idx, layer, &[(style.field, value)], if value != 0.0 { style.params } else { &[] })
+    }
+
+    /// The file with layer `layer` of `entry` set to `want` and drawing with a shader built for it, found as
+    /// [`Doc::restyle`] finds one (`params` come from the layer that has it). The layer may already hold the wanted
+    /// values, as after the panel has set them: its own shader is never the answer, since it was built before.
+    pub fn reshade(&self, entry: &str, set_idx: usize, layer: usize, want: &[(&str, f32)], params: &[&str]) -> Result<(Self, Option<Restyled>)> {
         let unchanged = || Self::from_bytes(self.path.clone(), self.bytes.clone());
         let em = self.emitters(set_idx).get(layer).ok_or_else(|| anyhow!("no layer {layer} in {entry}"))?;
         let stored = |id: &str| attr(em, id).map(|v| v.as_f32());
-        if stored(style.field) == Some(value) {
-            return Ok((unchanged()?, Some(Restyled { from: "its own".into(), taken: Vec::new() })));
-        }
-        let current = |id: &str| if id == style.field { Some(value) } else { stored(id) };
+        let wanted = |id: &str| want.iter().find(|(w, _)| *w == id).map(|(_, v)| *v);
+        let current = |id: &str| wanted(id).or_else(|| stored(id));
         let shader = stored("shader_references.shader_index").ok_or_else(|| anyhow!("{} has no shader index", em.name))?;
         let own = self.variations().get(shader as usize).ok_or_else(|| anyhow!("shader {shader} of {} can't be read", em.name))?;
         let reads_birth = current("emitter_info.follow_type").unwrap_or(0.0) != 0.0;
@@ -987,6 +988,9 @@ impl Doc {
         // comes from the model (normals, vertex colour) only has to be there
         let per_particle = |inputs: &[String]| -> Vec<String> { inputs.iter().filter(|n| !MODEL_INPUTS.iter().any(|(m, _)| m == n)).cloned().collect() };
         let inputs = per_particle(&own.inputs);
+        // a way of facing the camera or following decides what the game feeds, so when one is asked for, the inputs
+        // come with it (the layer may already hold the value its shader doesn't draw yet)
+        let feeds_change = ["particle_data.billboard_type", "emitter_info.follow_type"].iter().any(|id| wanted(id).is_some());
         let model = match self.primitive_of(entry, &em.name) {
             Some(p) => Some(self.mesh(p)?),
             None => None,
@@ -1001,7 +1005,7 @@ impl Doc {
         const MUST: usize = usize::MAX / 1024;
         let cost: Vec<usize> = ids.iter().map(|id| match *id {
             "" | "particle_data.billboard_type" | "emitter_info.follow_type" => MUST,
-            id if id == style.field => MUST,
+            id if wanted(id).is_some() => MUST,
             id if id.starts_with("particle_color.") && id.ends_with("_type") => 40,
             // which channel of a texture gives the shape
             id if id.starts_with("combiner.tex_") && id.ends_with("_input_type") => 45,
@@ -1009,7 +1013,7 @@ impl Doc {
             _ => 10,
         }).collect();
         let fit = |v: &Variation, other: &[i64]| -> Option<usize> {
-            if v.reads_birth != reads_birth || other.len() != key.len() || per_particle(&v.inputs) != inputs
+            if v.reads_birth != reads_birth || other.len() != key.len() || (!feeds_change && per_particle(&v.inputs) != inputs)
                 || v.inputs.iter().any(|n| MODEL_INPUTS.iter().any(|(m, _)| m == n) && !model_has(n))
             {
                 return None;
@@ -1020,7 +1024,7 @@ impl Doc {
         let variations = self.variations();
         let in_file = self.effects().into_iter().flat_map(|(effect, s)| {
             self.emitters(s).iter().enumerate().map(move |(l, other)| (effect.clone(), s, l, other))
-        }).filter_map(|(effect, s, l, other)| {
+        }).filter(|(_, s, l, _)| (*s, *l) != (set_idx, layer)).filter_map(|(effect, s, l, other)| {
             let value = |id: &str| attr(other, id).map(|v| v.as_f32());
             let v = variations.get(value("shader_references.shader_index")? as usize)?;
             Some((fit(v, &shader_key(other, &value))?, effect, s, l))
@@ -1053,8 +1057,11 @@ impl Doc {
                 };
                 let base = self.rebuilt_from(&EffMod { transplants: vec![op], ..Default::default() }, root.as_deref())?;
                 let kept = self.emitters(set_idx).len();
-                let l = base.emitters(set_idx).iter().skip(kept).position(|e| e.name == donor.layer)
-                    .ok_or_else(|| anyhow!("{} didn't come in", donor.layer))? + kept;
+                // the one layer that came in, renamed if the effect already has its name
+                if base.emitters(set_idx).len() <= kept {
+                    return Err(anyhow!("{} didn't come in", donor.layer));
+                }
+                let l = kept;
                 (Some(base), (set_idx, l), format!("{} / {} / {}", donor.file, donor.effect, donor.layer), Some(kept))
             }
         };
@@ -1062,19 +1069,21 @@ impl Doc {
         let em = &doc.emitters(set_idx)[layer];
         let donor = &doc.emitters(at.0)[at.1];
         let mut values: BTreeMap<String, AttrValue> = BTreeMap::new();
-        let like = attr(em, style.field).ok_or_else(|| anyhow!("{} has no {}", em.name, style.field))?;
-        values.insert(style.field.into(), typed(like, value));
+        for (id, value) in want {
+            let like = attr(em, id).ok_or_else(|| anyhow!("{} has no {id}", em.name))?;
+            values.insert(id.to_string(), typed(like, *value));
+        }
         let theirs = shader_key(donor, &|id| attr(donor, id).map(|v| v.as_f32()));
         let mut taken = Vec::new();
         for (i, id) in ids.iter().enumerate() {
-            if !id.is_empty() && *id != style.field && theirs.get(i) != key.get(i) {
+            if !id.is_empty() && wanted(id).is_none() && theirs.get(i) != key.get(i) {
                 if let Some(v) = attr(donor, id) {
                     values.insert(id.to_string(), v);
                     taken.push(id.to_string());
                 }
             }
         }
-        for id in if value != 0.0 { style.params } else { &[] } {
+        for id in params {
             if let Some(v) = attr(donor, id) {
                 values.insert(id.to_string(), v);
             }
@@ -1135,39 +1144,6 @@ impl Doc {
         }
     }
 
-    /// What a layer's shader is compiled for besides its modes: the texture combiner, mesh or sprite, and a second
-    /// texture. Two layers that agree here draw alike, so one can use the other's shader.
-    fn look(&self, entry: &str, em: &EmitterDef) -> (Vec<(usize, i64)>, bool, bool) {
-        let combiner = fields::table().iter().enumerate()
-            .filter(|(_, a)| a.id.starts_with("combiner."))
-            .filter_map(|(i, _)| Some((i, em.attrs.get(i).copied()??.as_i64())))
-            .collect();
-        (combiner, self.primitive_of(entry, &em.name).is_some(), em.texture_index1.is_some())
-    }
-
-    /// Another layer in this file that looks like `em` and whose shader is compiled with every mode in `want`.
-    /// `current` reads the layer's values as edited, so the best donor also keeps the layer's other modes.
-    pub fn shader_donor(&self, entry: &str, em: &EmitterDef, want: &[(&str, f32)], current: impl Fn(&str) -> Option<f32>) -> Option<Donor> {
-        let look = self.look(entry, em);
-        let mut best: Option<(usize, Donor)> = None;
-        for (effect, set_idx) in self.effects() {
-            for donor in self.emitters(set_idx) {
-                let value = |id: &str| attr(donor, id).map(|v| v.as_f32());
-                if !want.iter().all(|(id, v)| value(id) == Some(*v)) || self.look(&effect, donor) != look {
-                    continue;
-                }
-                let Some(shader_index) = value("shader_references.shader_index") else { continue };
-                let shared = BAKED_MODES.iter()
-                    .filter(|id| !want.iter().any(|(w, _)| w == *id))
-                    .filter(|id| value(id) == current(id))
-                    .count();
-                if best.as_ref().map_or(true, |(score, _)| shared > *score) {
-                    best = Some((shared, Donor { effect: effect.clone(), layer: donor.name.clone(), shader_index }));
-                }
-            }
-        }
-        best.map(|(_, d)| d)
-    }
 }
 
 pub fn attr(emitter: &EmitterDef, id: &str) -> Option<AttrValue> {
@@ -1204,30 +1180,29 @@ impl Doc {
         self.apply_values(&pending)
     }
 
-    /// Every layer of an effect drawn with a shader built for `id = value`, borrowed as the panel does
-    /// (`effect_forge borrow`). Also says, per layer, whose shader it took.
-    pub fn borrow_on_effect(&self, effect: &str, id: &str, value: f32) -> Result<(Self, Vec<String>)> {
+    /// Layer `only` of an effect, or every layer, set to `id = value` and drawing with a shader built for it, found
+    /// as the panel finds one ([`Doc::reshade`]; `effect_forge borrow`). Says, per layer, whose shader it took.
+    pub fn borrow_on_effect(&self, effect: &str, only: Option<usize>, id: &str, value: f32) -> Result<(Self, Vec<String>)> {
         let (entry, set) = self.find(effect)?;
-        let mut pending = Pending::new();
+        let mut doc = Self::from_bytes(self.path.clone(), self.bytes.clone())?;
         let mut report = Vec::new();
-        for (index, emitter) in self.emitters(set).iter().enumerate() {
-            let current = |id: &str| attr(emitter, id).map(|v| v.as_f32());
-            if current(id) == Some(value) {
-                report.push(format!("{}: already", emitter.name));
+        for index in 0..self.emitters(set).len() {
+            if only.is_some_and(|o| o != index) {
                 continue;
             }
-            match self.shader_donor(&entry, emitter, &[(id, value)], current) {
-                Some(d) => {
-                    report.push(format!("{}: shader {} from {} / {}", emitter.name, d.shader_index, d.effect, d.layer));
-                    let row = pending.entry((set, index)).or_default();
-                    for (key, v) in [("shader_references.shader_index", d.shader_index), (id, value)] {
-                        let like = attr(emitter, key).ok_or_else(|| anyhow!("no field {key} on {}", emitter.name))?;
-                        row.insert(key.to_string(), typed(like, v));
-                    }
-                }
-                None => report.push(format!("{}: no donor", emitter.name)),
+            let name = self.emitters(set)[index].name.clone();
+            if attr(&doc.emitters(set)[index], id).map(|v| v.as_f32()) == Some(value) {
+                report.push(format!("{name}: already"));
+                continue;
             }
+            let (next, found) = doc.reshade(&entry, set, index, &[(id, value)], &[])?;
+            doc = next;
+            report.push(match found {
+                Some(r) if r.taken.is_empty() => format!("{name}: shader from {}", r.from),
+                Some(r) => format!("{name}: shader from {}; took {}", r.from, r.taken.join(", ")),
+                None => format!("{name}: no shader draws it that way; unchanged"),
+            });
         }
-        Ok((self.apply_values(&pending)?, report))
+        Ok((doc, report))
     }
 }

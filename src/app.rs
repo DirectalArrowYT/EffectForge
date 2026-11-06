@@ -47,6 +47,8 @@ enum Job {
     Import(PathBuf, Vec<String>, bool),
     /// Layers of this effect (or every effect) put on shaders that match how they follow their bone.
     FixTrails(Option<String>),
+    /// A layer moved to a shader built for values just set.
+    Reshade(controls::Reshade),
 }
 
 /// Effects to copy in from another file, being picked.
@@ -65,6 +67,10 @@ enum Done {
     Saved(Result<PathBuf>),
     Exported(Result<usize>, PathBuf),
     Tuned(Result<Tuned>, String),
+    /// A layer on a new shader: what to show, and the layer (set, layer) with where its shader came from, or `None`
+    /// to forget that it borrowed one.
+    /// `bool`: this went back to the layer's own look.
+    Reshaded(Result<Doc>, String, (usize, usize), Option<controls::Borrowed>, bool),
 }
 
 /// Files opened before, newest first.
@@ -140,6 +146,8 @@ pub struct App {
     importing: Option<ImportPick>,
     /// An effect whose trail was just switched: its shaders are checked once the change is in.
     trail_fix: Option<String>,
+    /// A shader to find once the values being applied are in.
+    reshade: Option<controls::Reshade>,
     folder_name: String,
     /// A folder being renamed and the name typed so far.
     folder_edit: Option<(usize, String)>,
@@ -217,7 +225,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
-            project: None, renaming: None, rename_to: String::new(), importing: None, trail_fix: None, folder_name: String::new(), folder_edit: None,
+            project: None, renaming: None, rename_to: String::new(), importing: None, trail_fix: None, reshade: None, folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
@@ -291,6 +299,38 @@ impl App {
                         .and_then(|(bytes, _)| Ok(std::fs::write(&into, bytes)?))
                         .map(|_| Tuned::load(&tuned)),
                     format!("Tuned effects put into {}", into.display())),
+                Job::Reshade(r) => {
+                    let doc = doc.expect("doc");
+                    let (key, back) = ((r.set, r.layer), r.back.is_none());
+                    let want: Vec<(&str, f32)> = r.want.iter().map(|(id, v)| (id.as_str(), *v)).collect();
+                    let before = doc.emitters(r.set).get(r.layer).cloned();
+                    let was = |id: &str| before.as_ref().and_then(|em| attr(em, id)).map(|v| v.as_f32());
+                    match doc.reshade(&r.entry, r.set, r.layer, &want, &[]) {
+                        Ok((doc, Some(found))) => {
+                            let names: Vec<&str> = found.taken.iter().map(|id| {
+                                crate::eff::fields::table().iter().find(|a| a.id == id).map_or(id.as_str(), |a| a.label)
+                            }).collect();
+                            let mut note = format!("{}: shader from {}", r.what, found.from);
+                            if !names.is_empty() {
+                                note += &format!("; it also needs {} as that layer has them", names.join(", "));
+                            }
+                            // what goes back: the values asked for, and what the shader also needed, as they were
+                            let borrowed = r.back.map(|mut undo| {
+                                let modes = undo.clone();
+                                for id in &found.taken {
+                                    if let Some(v) = was(id).filter(|_| !undo.iter().any(|(i, _)| i == id)) {
+                                        undo.push((id.clone(), v));
+                                    }
+                                }
+                                controls::Borrowed { from: found.from, undo, modes }
+                            });
+                            Done::Reshaded(Ok(doc), note, key, borrowed, back)
+                        }
+                        Ok((doc, None)) => Done::Reshaded(Ok(doc), format!("{}: no shader in this file{} draws this layer that way, so                             the value is set but the preview and the game won't show it", r.what,
+                            if game_root().is_some() { " or the game's" } else { " (choose the game files folder to look in the game's too)" }), key, None, back),
+                        Err(e) => Done::Reshaded(Err(e), r.what, key, None, back),
+                    }
+                }
                 Job::FixTrails(only) => match doc.expect("doc").fix_trail_shaders(only.as_deref()) {
                     Ok((doc, found)) => {
                         let fixed = found.iter().filter(|m| m.fix.is_some()).count();
@@ -326,6 +366,32 @@ impl App {
             let (done, show_layer) = match done {
                 Done::Layer(Ok(doc), at) => (Done::Doc(Ok(doc), "Layer duplicated".into()), Some(at)),
                 Done::Layer(Err(e), _) => (Done::Doc(Err(e), "Duplicating the layer".into()), None),
+                // a borrow keeps what to put back, merged with any earlier one so the way back is to the layer's own
+                Done::Reshaded(doc, note, key, borrowed, back) => {
+                    let earlier = self.borrowed.remove(&key);
+                    match (borrowed, earlier) {
+                        (Some(mut b), Some(earlier)) if doc.is_ok() => {
+                            let first = |now: &mut Vec<(String, f32)>, was: Vec<(String, f32)>| {
+                                for (id, v) in was.into_iter().rev() {
+                                    now.retain(|(i, _)| *i != id);
+                                    now.insert(0, (id, v));
+                                }
+                            };
+                            first(&mut b.undo, earlier.undo);
+                            first(&mut b.modes, earlier.modes);
+                            self.borrowed.insert(key, b);
+                        }
+                        (Some(b), None) if doc.is_ok() => {
+                            self.borrowed.insert(key, b);
+                        }
+                        // nothing new borrowed: the layer is still on the earlier shader, unless it went back
+                        (_, Some(earlier)) if !back || doc.is_err() => {
+                            self.borrowed.insert(key, earlier);
+                        }
+                        _ => {}
+                    }
+                    (Done::Doc(doc, note), None)
+                }
                 done => (done, None),
             };
             if let Some(at) = show_layer {
@@ -371,8 +437,12 @@ impl App {
                         self.unsaved = true;
                     }
                     // a trail just switched on or off: its layers want shaders to match
+                    // a value compiled into the shader: the layer wants one built for it
                     if note == "Applied" {
-                        if let Some(effect) = self.trail_fix.take() {
+                        if let Some(r) = self.reshade.take() {
+                            let what = r.what.clone();
+                            self.run(Job::Reshade(r), &format!("Finding a shader for {what}"));
+                        } else if let Some(effect) = self.trail_fix.take() {
                             if self.doc.as_ref().is_some_and(|d| !d.trail_mismatches(Some(&effect)).is_empty()) {
                                 self.run(Job::FixTrails(Some(effect)), "Matching the shader to the trail");
                             }
@@ -380,7 +450,7 @@ impl App {
                     }
                     self.status = note;
                 }
-                Done::Layer(..) => unreachable!("turned into Done::Doc above"),
+                Done::Layer(..) | Done::Reshaded(..) => unreachable!("turned into Done::Doc above"),
                 Done::Doc(Err(e), note) => {
                     self.busy = None;
                     self.renaming = None;

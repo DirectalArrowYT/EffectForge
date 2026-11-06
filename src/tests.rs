@@ -59,45 +59,74 @@ fn set_gives_the_same_bytes() {
 fn borrow_gives_the_same_bytes_and_donors() {
     let Some(path) = pit() else { return };
     let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    // the whole game is searched, whichever test runs first
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&path).expect("the game folder"));
+    }
     let doc = open(&path);
-    let (keyed, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", "particle_color.alpha0_type", 2.0).unwrap();
+    let (keyed, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", None, "particle_color.alpha0_type", 2.0).unwrap();
     assert_eq!(report, [
         "tsubu1: already",
-        "thunder1: shader 144 from PIT_FLY_MIRACLE_B / Feather1",
-        "shield_aura: shader 5 from PIT_ATK_AIR_N / sword_outLine",
-        "shield: shader 49 from PIT_PA_MAX / ring2_b",
-        "shield_light: no donor",
-        "wing: no donor",
+        "thunder1: shader from effect/system/common/ef_common.eff / SYS_HIT_DEAD / flash1_alpha",
+        "shield_aura: shader from effect/fighter/buddy/ef_buddy.eff / BUDDY_ATTACK_LW_SMOKE / flare1",
+        "shield: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_FINAL_GAUGE_FINISH / magicL1",
+        "shield_light: shader from effect/fighter/palutena/ef_palutena.eff / PALUTENA_MIRROR / mirror1_alpha; took texture_anim0.is_scroll, combiner.primitive_color_input_type",
+        "wing: shader from effect/fighter/dolly/ef_dolly.eff / DOLLY_WAVE / waveBase; took texture_anim0.is_scroll, texture_anim1.is_scale, combiner.texture1_color_blend, combiner.tex_alpha1_input_type",
         "flare1_add: already",
-        "ring1: shader 5 from PIT_ATK_AIR_N / sword_outLine",
-        "flashline2: shader 5 from PIT_ATK_AIR_N / sword_outLine",
-        "flashline1a: shader 5 from PIT_ATK_AIR_N / sword_outLine",
-        "flashline1b: shader 5 from PIT_ATK_AIR_N / sword_outLine",
-        "flashline2_add: shader 155 from PIT_FINAL_ATTACK / flare1",
-        "ring1_add: shader 155 from PIT_FINAL_ATTACK / flare1",
+        "ring1: shader from effect/fighter/elight/ef_elight.eff / ELIGHT_PHOTON_FLASH / ring1",
+        "flashline2: shader from effect/fighter/kirby/ef_kirby.eff / KIRBY_AIR_N / ring1",
+        "flashline1a: shader from PIT_GUARDIAN_SHIELD / flashline2",
+        "flashline1b: shader from PIT_GUARDIAN_SHIELD / flashline2",
+        "flashline2_add: shader from effect/system/common/ef_common.eff / SYS_REFLECTION / 3lineFlash_f; took texture_anim0.pattern_anim_type",
+        "ring1_add: shader from effect/fighter/miifighter/ef_miifighter.eff / MIIFIGHTER_SPINKICK_FLASH / ring; took texture_anim0.pattern_anim_type, combiner.alpha_combiner_process",
         "rainbow1: already",
         "rainbow2: already",
     ]);
-    assert_eq!(fnv(&keyed.bytes), 0x679c0b8147837749);
-    let (stretched, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", "particle_data.billboard_type", 5.0).unwrap();
+    assert_eq!(fnv(&keyed.bytes), 0x67d31e67547ec959);
+    let (stretched, report) = doc.borrow_on_effect("PIT_GUARDIAN_SHIELD", None, "particle_data.billboard_type", 5.0).unwrap();
     assert_eq!(report, [
-        "tsubu1: no donor",
-        "thunder1: shader 37 from PIT_PA_FLY_ARROW / arrow_flare",
-        "shield_aura: shader 169 from PIT_FINAL_END / light1",
-        "shield: no donor",
-        "shield_light: no donor",
-        "wing: no donor",
-        "flare1_add: shader 169 from PIT_FINAL_END / light1",
-        "ring1: shader 169 from PIT_FINAL_END / light1",
-        "flashline2: shader 169 from PIT_FINAL_END / light1",
-        "flashline1a: shader 169 from PIT_FINAL_END / light1",
-        "flashline1b: shader 169 from PIT_FINAL_END / light1",
-        "flashline2_add: no donor",
-        "ring1_add: no donor",
-        "rainbow1: no donor",
-        "rainbow2: no donor",
+        "tsubu1: shader from effect/fighter/captain/ef_captain.eff / CAPTAIN_FINAL_LINE_A / Line3; took texture_anim0.is_scroll, texture_anim0.is_scale, combiner.color_combiner_process",
+        "thunder1: shader from effect/fighter/dedede/ef_dedede.eff / DEDEDE_JETHAMMER_HOLD / fireCenter2",
+        "shield_aura: shader from effect/fighter/lucario/ef_lucario.eff / LUCARIO_FINAL_BEAM / beam_Line2",
+        "shield: shader from effect/fighter/edge/ef_edge.eff / EDGE_OCTASLASH_LINE / lightline2B",
+        "shield_light: shader from effect/fighter/krool/ef_krool.eff / KROOL_SMASH_S4 / line2_b; took texture_anim0.is_scroll, combiner.tex_alpha0_input_type, combiner.tex_alpha1_input_type, combiner.primitive_color_input_type",
+        "wing: shader from effect/fighter/diddy/ef_diddy.eff / DIDDY_POPGUN / muzzleflash1_back; took texture_anim1.is_scroll, combiner.texture1_color_blend, combiner.tex_alpha1_input_type",
+        "flare1_add: shader from effect/fighter/bayonetta/ef_bayonetta.eff / BAYONETTA_FINAL_GAUGE_MOON / line1",
+        "ring1: shader from effect/fighter/ganon/ef_ganon.eff / GANON_MAJINKEN_FLASH / lightning1",
+        "flashline2: shader from effect/fighter/chrom/ef_chrom.eff / CHROM_COUNTER_SUCCESS / zigzagline1",
+        "flashline1a: shader from PIT_GUARDIAN_SHIELD / flashline2",
+        "flashline1b: shader from PIT_GUARDIAN_SHIELD / flashline2",
+        "flashline2_add: shader from effect/fighter/jack/ef_jack.eff / JACK_DOYLE_BOMB / flashLine1_f",
+        "ring1_add: shader from PIT_GUARDIAN_SHIELD / flashline2_add; took texture_anim0.is_scale",
+        "rainbow1: shader from effect/fighter/miiswordsman/ef_miiswordsman.eff / MIISWORDSMAN_ROCKET_STAB / stab3_add; took texture_anim0.is_scale",
+        "rainbow2: shader from PIT_GUARDIAN_SHIELD / rainbow1; took texture_anim0.is_scale",
     ]);
-    assert_eq!(fnv(&stretched.bytes), 0xe712aa5b613e444e);
+    assert_eq!(fnv(&stretched.bytes), 0x246f4bd80bdc60a3);
+}
+
+/// The app sets a value first and finds the shader once it is in; that lands where a borrow straight away does.
+#[test]
+fn values_then_reshade_matches_a_borrow() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if engine::game_root().is_none() {
+        std::env::set_var("FORGE_GAME_ROOT", game_root_above(&path).expect("the game folder"));
+    }
+    let doc = open(&path);
+    let (entry, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
+    for (id, value) in [("particle_color.alpha0_type", 2.0), ("particle_data.billboard_type", 5.0)] {
+        for layer in [1, 7] {
+            let (direct, report) = doc.borrow_on_effect(&entry, Some(layer), id, value).unwrap();
+            let mut pending = Pending::new();
+            let like = engine::attr(&doc.emitters(set)[layer], id).unwrap();
+            pending.entry((set, layer)).or_default().insert(id.into(), engine::typed(like, value));
+            let (later, found) = doc.apply_values(&pending).unwrap().reshade(&entry, set, layer, &[(id, value)], &[]).unwrap();
+            let found = found.expect("a shader");
+            assert!(report[0].contains(&found.from), "{id} on layer {layer}: {} vs {}", report[0], found.from);
+            let shader = |d: &Doc| engine::attr(&d.emitters(set)[layer], "shader_references.shader_index").unwrap().as_f32();
+            assert_eq!(shader(&direct), shader(&later), "{id} on layer {layer}");
+        }
+    }
 }
 
 /// Every value of every layer reads back as written after a rebuild that changes one of them.

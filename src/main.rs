@@ -76,10 +76,16 @@ fn main() {
         std::fs::write(out, &doc.set_on_effect(wanted, id, value).unwrap().bytes).unwrap();
         return;
     }
-    // Give every layer of an effect a shader built for a mode, as the panel does: borrow <eff> <out> <effect> <attr> <value>
-    if let ["borrow", eff, out, wanted, id, value] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    // Give a layer (or every layer) of an effect a shader built for a mode, as the panel does:
+    // borrow <eff> <out> <effect> [layer number] <attr> <value>
+    if let ["borrow", eff, out, wanted, layer @ .., id, value] = args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        let only = match layer {
+            [] => None,
+            [n] => Some(n.parse::<usize>().expect("a layer number") - 1),
+            _ => panic!("borrow <eff> <out> <effect> [layer number] <attr> <value>"),
+        };
         let doc = engine::Doc::open(Path::new(eff)).unwrap();
-        let (doc, report) = doc.borrow_on_effect(wanted, id, value.parse().unwrap()).unwrap();
+        let (doc, report) = doc.borrow_on_effect(wanted, only, id, value.parse().unwrap()).unwrap();
         for line in report {
             println!("{line}");
         }
