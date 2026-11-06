@@ -196,6 +196,28 @@ fn a_layer_that_may_not_show_says_why() {
     }
 }
 
+/// A layer renamed keeps everything else; a name another layer has, or one the game can't hold, is refused.
+#[test]
+fn a_renamed_layer_keeps_the_rest() {
+    let Some(path) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&path);
+    let (entry, set) = doc.find("PIT_GUARDIAN_SHIELD").unwrap();
+    let renamed = doc.rename_layer(&entry, set, 1, "bolt_glow").unwrap();
+    let (before, after) = (doc.emitters(set), renamed.emitters(set));
+    assert_eq!(after[1].name, "bolt_glow");
+    assert_eq!(before.len(), after.len());
+    for (a, b) in before.iter().zip(after) {
+        assert_eq!(doc.primitive_of(&entry, &a.name), renamed.primitive_of(&entry, &b.name));
+        for id in ["shader_references.shader_index", "particle_data.life", "particle_color.alpha0"] {
+            assert_eq!(engine::attr(a, id).map(|v| v.as_f32()), engine::attr(b, id).map(|v| v.as_f32()), "{id} of {}", a.name);
+        }
+    }
+    let first = before[0].name.clone();
+    assert!(doc.rename_layer(&entry, set, 1, &first).is_err());
+    assert!(doc.rename_layer(&entry, set, 1, "two words").is_err());
+}
+
 /// A picture's shape comes from the channel asked for, colour gives way to white when asked, and a shape that is
 /// solid or empty is pointed out.
 #[test]

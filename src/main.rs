@@ -182,6 +182,15 @@ fn main() {
             }
             return;
         }
+        // rename-layer <eff> <out> <effect> <layer number> <new name>
+        ["rename-layer", eff, out, effect, layer, new] => {
+            let doc = engine::Doc::open(Path::new(eff)).unwrap_or_else(|e| fail(&format!("{eff}: {e:#}")));
+            let (entry, set) = doc.find(effect).unwrap_or_else(|e| fail(&format!("{e:#}")));
+            let index = layer.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail(&format!("layer {layer}: a number from 1"))) - 1;
+            let doc = doc.rename_layer(&entry, set, index, new).unwrap_or_else(|e| fail(&format!("{e:#}")));
+            std::fs::write(out, &doc.bytes).unwrap_or_else(|e| fail(&format!("{out}: {e}")));
+            return;
+        }
         ["rename", eff, out, old, new] => {
             match engine::Doc::open(Path::new(eff)).and_then(|doc| doc.rename(old, new)) {
                 Ok(doc) => std::fs::write(out, &doc.bytes).unwrap(),
@@ -482,10 +491,10 @@ fn main() {
 }
 
 /// Every command, for the message when one doesn't match.
-const COMMANDS: [&str; 29] = [
+const COMMANDS: [&str; 30] = [
     "stage", "info", "caps", "colour2", "set", "borrow", "merge-tuned", "stage-effect", "layers", "attrs", "dump", "check",
     "trail-shaders", "style", "import", "sweep", "shot", "kit", "new-effect", "add-layer", "remove-layer",
-    "duplicate-layer", "value", "texture", "model", "rename", "project", "folder", "export",
+    "duplicate-layer", "value", "texture", "model", "rename", "rename-layer", "project", "folder", "export",
 ];
 
 /// A command line that can't be carried out: say why and stop (never falling through to the window).

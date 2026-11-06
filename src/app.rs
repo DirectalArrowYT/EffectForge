@@ -30,6 +30,7 @@ enum Job {
     AddLayer(String, &'static Piece, Option<MeshData>),
     /// Layer n of an effect (and the layers under it) copied, the copy placed after them.
     DuplicateLayer(String, usize, usize),
+    RenameLayer(String, usize, usize, String),
     /// Layer n of an effect (and the layers under it) taken out.
     RemoveLayer(String, usize, usize),
     /// Layer n of an effect switched to a value of `STYLES[.3]`, on a shader drawn that way.
@@ -144,6 +145,9 @@ pub struct App {
     /// A rename on its way, for the project's folders to follow once it lands.
     renaming: Option<(String, String)>,
     rename_to: String,
+    /// The name being typed for a layer, while its Rename menu is open.
+    layer_name: String,
+    layer_name_for: usize,
     /// The import window, while open.
     importing: Option<ImportPick>,
     /// An effect whose trail was just switched: its shaders are checked once the change is in.
@@ -227,7 +231,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
-            project: None, renaming: None, rename_to: String::new(), importing: None, trail_fix: None, reshade: None, folder_name: String::new(), folder_edit: None,
+            project: None, renaming: None, rename_to: String::new(), layer_name: String::new(), layer_name_for: 0, importing: None, trail_fix: None, reshade: None, folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
@@ -278,6 +282,7 @@ impl App {
                     Ok((doc, at)) => Done::Layer(Ok(doc), at),
                     Err(e) => Done::Layer(Err(e), layer),
                 },
+                Job::RenameLayer(entry, set, layer, new) => Done::Doc(doc.expect("doc").rename_layer(&entry, set, layer, &new), format!("Layer renamed {new}")),
                 Job::RemoveLayer(entry, set, layer) => Done::Doc(doc.expect("doc").remove_layer(&entry, set, layer), "Layer removed".into()),
                 Job::Restyle(entry, set, layer, style, value) => {
                     let style = &STYLES[style];
@@ -1412,6 +1417,31 @@ impl App {
             }
             response.context_menu(|ui| {
                 ui.add_enabled_ui(ready, |ui| {
+                    ui.menu_button("Rename layer", |ui| {
+                        if self.layer_name.is_empty() || self.layer_name_for != i {
+                            self.layer_name = em.name.clone();
+                            self.layer_name_for = i;
+                        }
+                        ui.add(egui::TextEdit::singleline(&mut self.layer_name).desired_width(160.0));
+                        let check = crate::engine::check_layer_name(&self.layer_name).map(str::to_string);
+                        let taken = check.as_ref().is_ok_and(|n| emitters.iter().enumerate().any(|(j, e)| j != i && e.name.eq_ignore_ascii_case(n)));
+                        match (&check, taken) {
+                            (Err(e), _) => {
+                                ui.colored_label(Color32::from_rgb(255, 190, 90), e.to_string());
+                            }
+                            (Ok(_), true) => {
+                                ui.colored_label(Color32::from_rgb(255, 190, 90), "Another layer of this effect has that name.");
+                            }
+                            _ => {}
+                        }
+                        let ok = check.as_ref().is_ok_and(|n| *n != em.name) && !taken;
+                        if ui.add_enabled(ok, egui::Button::new("Rename")).clicked() {
+                            let new = check.unwrap();
+                            self.layer_name.clear();
+                            self.run(Job::RenameLayer(entry.to_string(), set_idx, i, new), "Renaming the layer");
+                            ui.close();
+                        }
+                    });
                     if ui.button("Duplicate layer").on_hover_text("Copies it and any layers under it.").clicked() {
                         self.duplicate_layer(entry, set_idx, i);
                         ui.close();

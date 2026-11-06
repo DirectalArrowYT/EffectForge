@@ -482,6 +482,30 @@ impl Doc {
         Ok((self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })?, end))
     }
 
+    /// The effect with layer `emitter_idx` called `new`: a name no other layer of the effect has.
+    pub fn rename_layer(&self, entry: &str, set_idx: usize, emitter_idx: usize, new: &str) -> Result<Self> {
+        let new = check_layer_name(new)?;
+        let emitters = self.emitters(set_idx);
+        let old = &emitters.get(emitter_idx).ok_or_else(|| anyhow!("{entry} has layers 1 to {}", emitters.len()))?.name;
+        if old == new {
+            return Err(anyhow!("that is already its name"));
+        }
+        if emitters.iter().enumerate().any(|(i, e)| i != emitter_idx && e.name.eq_ignore_ascii_case(new)) {
+            return Err(anyhow!("{entry} already has a layer called {new}"));
+        }
+        let slots = emitters.iter().enumerate().map(|(i, e)| EmitterSlot {
+            source_idx: i, source_name: e.name.clone(), name: if i == emitter_idx { new.to_string() } else { e.name.clone() },
+            depth: e.depth, source_set: String::new(),
+        }).collect();
+        let roster = EmitterRoster {
+            set_name: self.loaded.ptcl.emitter_sets[set_idx].name.clone(),
+            entry_name: entry.to_string(),
+            set_idx,
+            slots,
+        };
+        self.rebuilt(&EffMod { rosters: vec![roster], ..Default::default() })
+    }
+
     /// The effect without layer `emitter_idx` (and the layers under it).
     pub fn remove_layer(&self, entry: &str, set_idx: usize, emitter_idx: usize) -> Result<Self> {
         let emitters = self.emitters(set_idx);
@@ -571,6 +595,21 @@ pub fn check_effect_name(name: &str) -> Result<&str> {
     }
     if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '_')) {
         return Err(anyhow!("effect names take letters, digits and _ only, not '{c}'"));
+    }
+    Ok(name)
+}
+
+/// A layer name as the game's own are: letters, digits, `_` and `-`, up to 63 of them.
+pub fn check_layer_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("a layer needs a name"));
+    }
+    if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-')) {
+        return Err(anyhow!("layer names take letters, digits, _ and - only, not '{c}'"));
+    }
+    if name.len() > 63 {
+        return Err(anyhow!("layer names are at most 63 characters"));
     }
     Ok(name)
 }
