@@ -122,6 +122,20 @@ pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
 }
 
 /// Every emitter of a tree, parents before their children, with its depth.
+/// Each effect of a file with its set and that set's layers (name and depth, parent first), read without the rest.
+pub fn layer_tree(bytes: &[u8]) -> Result<Vec<(String, usize, String, Vec<(String, u8)>)>> {
+    let file = NamcoEffectFile::load(bytes).context("reading the effect file")?;
+    let Some(ptcl) = file.ptcl_file.as_ref() else { return Ok(Vec::new()) };
+    let sets = &ptcl.emitter_list.emitter_sets;
+    Ok(file.entry_names.iter().zip(&file.entries).filter_map(|(name, entry)| {
+        let set_idx = (entry.emitter_set_id as usize).checked_sub(1)?;
+        let set = sets.get(set_idx)?;
+        let mut layers = Vec::new();
+        each_emitter(&set.emitters, 0, &mut |e, depth| layers.push((e.data.display_name(), depth)));
+        Some((name.clone(), set_idx, set.name.clone(), layers))
+    }).collect())
+}
+
 fn each_emitter(list: &[Emitter], depth: u8, f: &mut dyn FnMut(&Emitter, u8)) {
     for e in list {
         f(e, depth);

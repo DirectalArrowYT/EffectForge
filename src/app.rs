@@ -66,7 +66,7 @@ enum Done {
     /// A layer copied: the file, and the copy's layer number to show.
     Layer(Result<Doc>, usize),
     Saved(Result<PathBuf>),
-    Exported(Result<usize>, PathBuf),
+    Exported(Result<project::Skipped>, PathBuf),
     Tuned(Result<Tuned>, String),
     /// A layer on a new shader: what to show, and the layer (set, layer) with where its shader came from, or `None`
     /// to forget that it borrowed one.
@@ -94,6 +94,43 @@ fn remember(recent: &mut Vec<PathBuf>, path: &Path) {
 }
 
 /// What a panic in a job or a draw says.
+/// A set's layers as names and depths, parent first.
+fn layer_list(emitters: &[EmitterDef]) -> Vec<(String, u8)> {
+    emitters.iter().map(|e| (e.name.clone(), e.depth)).collect()
+}
+
+/// A layer as the hidden list knows it: marking it unused or not keeps it hidden or shown.
+fn hidden_key(entry: &str, layer: &str) -> (String, String) {
+    (entry.to_ascii_lowercase(), unmarked(layer).to_ascii_lowercase())
+}
+
+/// The layers of an effect the preview leaves out: hidden for editing, or marked unused (with those under them).
+fn preview_hidden(hidden_layers: &std::collections::HashSet<(String, String)>, doc: &Doc, entry: &str, set_idx: usize) -> Vec<usize> {
+    let emitters = doc.emitters(set_idx);
+    let mut hidden = project::unused_layers(&layer_list(emitters));
+    for (i, em) in emitters.iter().enumerate() {
+        if hidden_layers.contains(&hidden_key(entry, &em.name)) && !hidden.contains(&i) {
+            hidden.push(i);
+        }
+    }
+    hidden
+}
+
+/// A layer name without the `UNUSED_` mark.
+fn unmarked(layer: &str) -> &str {
+    if project::is_unused(layer) { layer[project::UNUSED_PREFIX.len()..].trim_start_matches('_') } else { layer }
+}
+
+/// The name a layer takes when marked unused, or used again.
+fn marked(layer: &str, unused: bool) -> String {
+    let rest = unmarked(layer);
+    if !unused {
+        return rest.to_string();
+    }
+    let room = 63 - project::UNUSED_PREFIX.len();
+    format!("{}{}", project::UNUSED_PREFIX, &rest[..rest.len().min(room)])
+}
+
 fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
     panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "unknown panic".to_string())
 }
@@ -152,6 +189,8 @@ pub struct App {
     /// The name being typed for a layer, while its Rename menu is open.
     layer_name: String,
     layer_name_for: usize,
+    /// Layers hidden in the preview, by effect and layer name (without `UNUSED_`). Editing only: the file keeps them.
+    hidden_layers: std::collections::HashSet<(String, String)>,
     /// The import window, while open.
     importing: Option<ImportPick>,
     /// An effect whose trail was just switched: its shaders are checked once the change is in.
@@ -237,7 +276,7 @@ impl App {
             search: String::new(), select: None,
             game: cc.wgpu_render_state.clone().map(GamePreview::new), last_tick: std::time::Instant::now(),
             tuned: None, only_tuned: false, borrowed: Default::default(),
-            project: None, renaming: None, rename_to: String::new(), layer_name: String::new(), layer_name_for: 0, importing: None, trail_fix: None, reshade: None, folder_name: String::new(), folder_edit: None,
+            project: None, renaming: None, rename_to: String::new(), layer_name: String::new(), layer_name_for: 0, hidden_layers: Default::default(), importing: None, trail_fix: None, reshade: None, folder_name: String::new(), folder_edit: None,
             chosen: Vec::new(), anchor: None, nav: (0, false), frame_step: 0, reveal: false,
             settings: Settings::load(), unsaved_since: None, auto_saving: false,
         };
@@ -489,7 +528,7 @@ impl App {
                 }
                 Done::Exported(Ok(skipped), to) => {
                     self.busy = None;
-                    let left = if skipped == 0 { String::new() } else { format!(", {skipped} skipped") };
+                    let left = if skipped == project::Skipped::default() { String::new() } else { format!(", {skipped}") };
                     self.status = format!("Exported to {}{left}", to.display());
                 }
                 Done::Exported(Err(e), _) => {
@@ -724,9 +763,16 @@ impl App {
 
     fn export_hint(&self, to: &Path) -> String {
         let left_out = self.project.as_ref().map_or(0, |p| p.left_out().len());
-        let skipping = if left_out == 0 { String::new() } else { format!(" Skips {left_out} effects in folders marked to skip.") };
+        let mut skipping = if left_out == 0 { String::new() } else { format!(" Skips {left_out} effects in folders marked to skip.") };
+        let layers = self.doc.as_ref().map_or(0, |doc| {
+            doc.effects().iter().map(|(_, set)| project::unused_layers(&layer_list(doc.emitters(*set))).len()).sum()
+        });
+        if layers > 0 {
+            skipping += &format!(" Skips {layers} layers marked unused.");
+        }
         format!("Writes {}. The first export keeps a .forge-backup of what was there.{skipping}", to.display())
     }
+
 
     fn export(&mut self, to: PathBuf) {
         let left_out = self.project.as_ref().map(|p| p.left_out()).unwrap_or_default();
@@ -1198,6 +1244,7 @@ impl App {
         let pixels = ui.ctx().pixels_per_point();
         let size = [(available.x * pixels).max(16.0) as u32, (available.y * pixels).max(16.0) as u32];
         // One bad effect shouldn't take the window with it.
+        game.hidden = preview_hidden(&self.hidden_layers, doc, entry, set_idx);
         let rendered = catch_unwind(AssertUnwindSafe(|| game.render(doc, set_idx, size)))
             .unwrap_or_else(|panic| Err(anyhow::anyhow!("{} (see {})", panic_text(panic), crate::log::path().display())));
         match rendered {
@@ -1417,9 +1464,51 @@ impl App {
             });
         });
         let ready = idle && self.pending.is_empty() && self.applying.is_empty();
+        let in_project = self.project.is_some();
+        let unused = project::unused_layers(&layer_list(&emitters));
         let mut picked = None;
         for (i, em) in emitters.iter().enumerate() {
-            let response = ui.selectable_label(self.emitter == i, &em.name);
+            let marked_unused = project::is_unused(&em.name);
+            let under_unused = unused.contains(&i) && !marked_unused;
+            let response = ui.horizontal(|ui| {
+                let key = hidden_key(entry, &em.name);
+                let shown = !self.hidden_layers.contains(&key);
+                let eye = egui::RichText::new("\u{1F441}");
+                let eye = if shown && !unused.contains(&i) { eye } else { eye.weak() };
+                let hint = if unused.contains(&i) {
+                    "Not drawn: marked unused, so export leaves it out. \"Only this layer\" still shows it."
+                } else if shown {
+                    "Shown in the preview. Click to hide it while you edit; the file keeps it."
+                } else {
+                    "Hidden in the preview while you edit; the file keeps it and the game plays it. Click to show it."
+                };
+                if ui.add(egui::Button::new(eye).frame(false)).on_hover_text(hint).clicked() {
+                    if shown {
+                        self.hidden_layers.insert(key);
+                    } else {
+                        self.hidden_layers.remove(&key);
+                    }
+                }
+                let mut skip = marked_unused;
+                let toggle = ui.add_enabled(ready && in_project && !under_unused, egui::Checkbox::without_text(&mut skip));
+                let toggle = if under_unused {
+                    toggle.on_disabled_hover_text("A layer above it is marked unused, which leaves this one out too.")
+                } else if !in_project {
+                    toggle.on_disabled_hover_text("Marking layers unused is for projects: their export leaves the layer out. In an .eff opened on its own the game would still play it.")
+                } else {
+                    toggle.on_hover_text("Unused: export leaves this layer (and any under it) out. Adds UNUSED_ to its name.")
+                        .on_disabled_hover_text("Wait for the values to go in.")
+                };
+                if toggle.changed() {
+                    let label = if skip { "Marking the layer unused" } else { "Marking the layer used" };
+                    self.run(Job::RenameLayer(entry.to_string(), set_idx, i, marked(&em.name, skip)), label);
+                }
+                let mut text = egui::RichText::new(&em.name);
+                if unused.contains(&i) {
+                    text = text.weak().strikethrough();
+                }
+                ui.selectable_label(self.emitter == i, text)
+            }).inner;
             if response.clicked() {
                 picked = Some(i);
             }

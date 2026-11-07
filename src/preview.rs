@@ -59,6 +59,8 @@ pub struct Preview {
     pub orbit: egui::Vec2,
     /// Draw only this layer.
     pub solo: Option<usize>,
+    /// Layers not drawn: hidden for editing, or marked unused. "Only this layer" draws its layer anyway.
+    pub hidden: Vec<usize>,
     /// Half the height of the view at the origin, in Smash units.
     pub half_view: f32,
     /// Draw a yellow line round this layer.
@@ -79,7 +81,7 @@ impl Preview {
         render.device.on_uncaptured_error(Arc::new(|error| crate::log::note(&format!("GPU error: {error}"))));
         Self {
             render, target: None, renderer: None, meshes: HashMap::new(), pixels: HashMap::new(),
-            views: HashMap::new(), age: 0.0, playing: true, orbit: egui::Vec2::ZERO, solo: None, half_view: HALF_VIEW,
+            views: HashMap::new(), age: 0.0, playing: true, orbit: egui::Vec2::ZERO, solo: None, hidden: Vec::new(), half_view: HALF_VIEW,
             outline: None, swing: false, outline_pipeline: None, backdrop: [0.013, 0.012, 0.024],
             ghost: None, ghost_opacity: 0.35, ghost_pipeline: None,
         }
@@ -105,8 +107,10 @@ impl Preview {
         let file = doc.working();
         let mut out = Vec::new();
         for (index, emitter) in doc.emitters(set_idx).iter().enumerate() {
-            if self.solo.is_some_and(|solo| solo != index) {
-                continue;
+            match self.solo {
+                Some(solo) if solo != index => continue,
+                None if self.hidden.contains(&index) => continue,
+                _ => {}
             }
             let Some(game) = doc.loaded.game.get(set_idx).and_then(|set| set.get(index)).cloned().flatten() else { continue };
             let sim = EmitterSim::read(emitter);

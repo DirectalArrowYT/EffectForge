@@ -859,6 +859,52 @@ fn layer_duplicates() {
     }
 }
 
+/// A layer marked unused counts the layers under it; one after them at its depth or above doesn't.
+#[test]
+fn unused_layers_take_their_children() {
+    let layers: Vec<(String, u8)> = [("a", 0), ("UNUSED_b", 0), ("c", 1), ("d", 2), ("e", 1), ("f", 0), ("unused_g", 1)]
+        .iter().map(|(n, d)| (n.to_string(), *d)).collect();
+    assert_eq!(crate::project::unused_layers(&layers), vec![1, 2, 3, 4, 6]);
+}
+
+/// Export leaves out the layers marked unused and those under them, keeps the rest of the effect as it was, and
+/// leaves out an effect whose every layer is unused.
+#[test]
+fn export_skips_unused_layers() {
+    let Some(pit) = pit() else { return };
+    let _turn = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let doc = open(&pit);
+    let effects = doc.effects();
+    let (entry, set) = effects.iter().find(|(_, set)| doc.emitters(*set).len() > 2).cloned().expect("an effect with layers");
+    let marked = doc.rename_layer(&entry, set, 1, &format!("UNUSED_{}", doc.emitters(set)[1].name)).unwrap();
+    let (lone, lone_set) = effects.iter().find(|(_, s)| doc.emitters(*s).len() == 1 && *s != set).cloned().expect("a one-layer effect");
+    let marked = marked.rename_layer(&lone, lone_set, 0, "UNUSED_all").unwrap();
+    let before = marked.emitters(set).to_vec();
+    let gone: Vec<usize> = crate::project::unused_layers(&before.iter().map(|e| (e.name.clone(), e.depth)).collect::<Vec<_>>());
+    assert!(gone.contains(&1));
+
+    let (bytes, skipped) = crate::project::exported(&marked.bytes, &[]).unwrap();
+    assert_eq!(skipped, crate::project::Skipped { effects: 1, layers: gone.len() });
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("forge_layers_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("out.eff"), &bytes).unwrap();
+    let out = open(&dir.join("out.eff"));
+    assert!(!out.effects().iter().any(|(n, _)| *n == lone), "the effect with every layer unused is gone");
+    let (_, out_set) = out.effects().into_iter().find(|(n, _)| *n == entry).expect("the effect stays");
+    let kept: Vec<&crate::eff::model::EmitterDef> = before.iter().enumerate().filter(|(i, _)| !gone.contains(i)).map(|(_, e)| e).collect();
+    let after = out.emitters(out_set);
+    assert_eq!(after.len(), kept.len());
+    // shaders only the dropped layers used go with them, which renumbers the rest
+    let table = crate::eff::fields::table();
+    for (x, y) in kept.iter().zip(after) {
+        assert_eq!((&x.name, x.depth), (&y.name, y.depth));
+        for (i, (a, b)) in x.attrs.iter().zip(&y.attrs).enumerate() {
+            assert!(a == b || table[i].id.contains("shader_index"), "{} {}: {a:?} became {b:?}", x.name, table[i].id);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A renamed effect keeps its layers and its values, and an export takes the effects of a skipped folder out entirely
 /// (name and set) and leaves every other effect as it was.
 #[test]
@@ -891,7 +937,7 @@ fn rename_and_export_skipping_a_folder() {
     project.save().unwrap();
     let project = crate::project::Project::load(&project.path).unwrap();
     let skipped = crate::project::export(&std::fs::read(project.eff_path()).unwrap(), &project.left_out(), &dir.join("out.eff")).unwrap();
-    assert_eq!(skipped, 1);
+    assert_eq!(skipped, crate::project::Skipped { effects: 1, layers: 0 });
     let out = open(&dir.join("out.eff"));
     let file = effect_library::NamcoEffectFile::load(&out.bytes).unwrap();
     assert!(!file.entry_names.iter().any(|n| n == "forge_renamed"), "the skipped effect's name is gone");

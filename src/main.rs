@@ -232,13 +232,13 @@ fn main() {
             made.save().unwrap();
             return;
         }
-        // export <file.forge> [to]: as Export does, leaving out the UNUSED_ folders
+        // export <file.forge> [to]: as Export does, leaving out the UNUSED_ folders and layers
         ["export", forge, rest @ ..] => {
             let made = project::Project::load(Path::new(forge)).unwrap();
             let to = rest.first().map(PathBuf::from).or(made.export_to.clone()).expect("somewhere to export to");
             let bytes = std::fs::read(made.eff_path()).unwrap();
             match project::export(&bytes, &made.left_out(), &to) {
-                Ok(skipped) => println!("exported to {} ({skipped} left out)", to.display()),
+                Ok(skipped) => println!("exported to {} ({skipped})", to.display()),
                 Err(e) => {
                     eprintln!("export failed: {e:#}");
                     std::process::exit(1);

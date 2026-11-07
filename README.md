@@ -92,6 +92,11 @@ folder to skip it on export: the tick adds `UNUSED_` to its name, and every fold
 skipped effect is not in the exported file at all (name, parts and emitter set), and whatever only it used is dropped;
 a set another effect also plays stays for that one. A script that still asks for a skipped effect plays nothing.
 
+Each layer in the layer list has two toggles. The eye hides the layer in the preview while you edit; the file keeps it
+and the game plays it. The tick (projects only) marks the layer unused: it adds `UNUSED_` to the layer's name, the
+preview stops drawing it, and export leaves it out with any layers under it. An effect whose layers are all unused is
+left out whole. **Only this layer** still shows a hidden or unused layer.
+
 **Rename** beside the effect's name renames it (letters, digits and `_`). Scripts that play it need the new name.
 
 ## Bringing effects over from another file

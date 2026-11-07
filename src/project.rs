@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const EXTENSION: &str = "forge";
 const EFF_SUFFIX: &str = ".project.eff";
 
-/// Folders whose names start with this are left out of the export.
+/// Folders, and layers, whose names start with this are left out of the export.
 pub const UNUSED_PREFIX: &str = "UNUSED_";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -167,19 +167,84 @@ impl Project {
     }
 }
 
-/// `bytes` as exported: the effects of `left_out` taken out entirely (a script that still calls one finds nothing,
-/// which plays nothing) and whatever only they used dropped. Returns the bytes and how many were left out.
-pub fn exported(bytes: &[u8], left_out: &[String]) -> Result<(Vec<u8>, usize)> {
-    let names = effect_library::NamcoEffectFile::load(bytes).context("reading the project's effect file")?.entry_names;
-    let drop: Vec<&str> = names.iter().filter(|n| left_out.iter().any(|l| l.eq_ignore_ascii_case(n))).map(String::as_str).collect();
-    if drop.is_empty() {
-        return Ok((bytes.to_vec(), 0));
+/// What an export leaves out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Skipped {
+    pub effects: usize,
+    pub layers: usize,
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        match (self.effects, self.layers) {
+            (0, 0) => write!(f, "nothing left out"),
+            (e, 0) => write!(f, "{} left out", plural(e, "effect")),
+            (0, l) => write!(f, "{} left out", plural(l, "layer")),
+            (e, l) => write!(f, "{} and {} left out", plural(e, "effect"), plural(l, "layer")),
+        }
     }
-    Ok((crate::eff::writer::drop_entries(bytes, &drop)?, drop.len()))
+}
+
+/// `bytes` as exported: the layers marked unused (`UNUSED_...`) taken out with the layers under them, and the effects
+/// of `left_out` (and any whose every layer is unused) taken out entirely: a script that still calls one finds nothing,
+/// which plays nothing. Whatever only they used is dropped.
+pub fn exported(bytes: &[u8], left_out: &[String]) -> Result<(Vec<u8>, Skipped)> {
+    use crate::eff::edits::{EffMod, EmitterRoster, EmitterSlot};
+    let tree = crate::eff::model::layer_tree(bytes).context("reading the project's effect file")?;
+    let names = effect_library::NamcoEffectFile::load(bytes).context("reading the project's effect file")?.entry_names;
+    let mut drop: Vec<&str> = names.iter().filter(|n| left_out.iter().any(|l| l.eq_ignore_ascii_case(n))).map(String::as_str).collect();
+    let mut rosters: Vec<EmitterRoster> = Vec::new();
+    let mut layers = 0;
+    for (entry, set_idx, set_name, set_layers) in &tree {
+        if drop.iter().any(|d| d.eq_ignore_ascii_case(entry)) || rosters.iter().any(|r| r.set_idx == *set_idx) {
+            continue;
+        }
+        let unused = unused_layers(set_layers);
+        if unused.is_empty() {
+            continue;
+        }
+        if unused.len() == set_layers.len() {
+            drop.push(entry);
+            continue;
+        }
+        layers += unused.len();
+        let slots = set_layers.iter().enumerate().filter(|(i, _)| !unused.contains(i))
+            .map(|(i, (name, depth))| EmitterSlot { source_idx: i, source_name: name.clone(), name: name.clone(), depth: *depth, source_set: String::new() })
+            .collect();
+        rosters.push(EmitterRoster { set_name: set_name.clone(), entry_name: entry.clone(), set_idx: *set_idx, slots });
+    }
+    let mut out = if rosters.is_empty() {
+        bytes.to_vec()
+    } else {
+        crate::eff::writer::rebuild(bytes, &EffMod { rosters, ..Default::default() }, None)?
+    };
+    if !drop.is_empty() {
+        out = crate::eff::writer::drop_entries(&out, &drop)?;
+    }
+    Ok((out, Skipped { effects: drop.len(), layers }))
+}
+
+/// Which of a set's layers (name and depth, parent first) are unused: marked so, or under one that is.
+pub fn unused_layers(layers: &[(String, u8)]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut under: Option<u8> = None;
+    for (i, (name, depth)) in layers.iter().enumerate() {
+        if under.is_some_and(|d| *depth <= d) {
+            under = None;
+        }
+        if under.is_none() && is_unused(name) {
+            under = Some(*depth);
+        }
+        if under.is_some() {
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// Write the export to `to`, keeping what was there as `.forge-backup` the first time.
-pub fn export(bytes: &[u8], left_out: &[String], to: &Path) -> Result<usize> {
+pub fn export(bytes: &[u8], left_out: &[String], to: &Path) -> Result<Skipped> {
     let (out, skipped) = exported(bytes, left_out)?;
     let backup = to.with_extension("eff.forge-backup");
     if to.exists() && !backup.exists() {
