@@ -448,8 +448,8 @@ fn main() {
         let replace = rest.first() == Some(&"replace");
         let wanted = if replace { &rest[1..] } else { rest };
         let doc = engine::Doc::open(Path::new(into)).expect("the file opens");
-        let source = engine::Doc::open(Path::new(from)).expect("the source opens");
-        let names: Vec<String> = source.effects().into_iter().map(|(n, _)| n)
+        // The names the app's import window offers.
+        let names: Vec<String> = engine::effect_names(Path::new(from)).expect("the source opens").into_iter()
             .filter(|n| wanted.iter().any(|w| match w.strip_suffix('*') {
                 Some(prefix) => n.to_ascii_uppercase().starts_with(&prefix.to_ascii_uppercase()),
                 None => n.eq_ignore_ascii_case(w),

@@ -547,14 +547,13 @@ impl Doc {
     /// Effects copied in from another file, each under its own name. One this file already has by that name is
     /// replaced when `replace`, else left as it is. Returns the file and the names left as they were.
     pub fn import(&self, from: &Path, effects: &[String], replace: bool) -> Result<(Self, Vec<String>)> {
-        let donor = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
-        let donor_names = entry_names(&donor)?;
+        let donor_names = effect_names(from)?;
         let file = from.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow!("no file name in {}", from.display()))?;
         let mut transplants = Vec::new();
         let mut kept = Vec::new();
         for name in effects {
             if !donor_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                return Err(anyhow!("{} has no effect called {name}", from.display()));
+                return Err(anyhow!("{} has no effect called {name}, or it has no layers to copy", from.display()));
             }
             let here = self.loaded.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).map(|e| e.name.clone());
             if here.is_some() && !replace {
@@ -819,9 +818,15 @@ fn copy_name(name: &str, taken: &[String]) -> String {
     .expect("a free name")
 }
 
-/// The names of the effects in an .eff on disk.
+/// The names of the effects in an .eff on disk that have something to copy: a file also lists names with no layers
+/// at all, and those can't be imported.
 pub fn effect_names(path: &Path) -> Result<Vec<String>> {
-    entry_names(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let file = effect_library::NamcoEffectFile::load(&bytes).context("reading the effect file")?;
+    Ok(file.entry_names.iter().zip(&file.entries)
+        .filter(|(_, e)| e.emitter_set_id != 0 || e.variant_count != 0)
+        .map(|(n, _)| n.clone())
+        .collect())
 }
 
 fn entry_names(bytes: &[u8]) -> Result<Vec<String>> {
